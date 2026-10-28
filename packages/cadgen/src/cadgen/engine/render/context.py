@@ -33,6 +33,7 @@ import io
 import os
 import struct
 import sys
+import tempfile
 import threading
 import time
 import zlib
@@ -328,13 +329,24 @@ class Canvas:
 def pixels(image: Any) -> np.ndarray:
     """An OCCT picture (``Image_PixMap``) as sRGB bytes (height, width, 3), top row first. OCP hands
     no pointer to a picture's buffer, so the picture is handed over as an uncompressed TGA in memory
-    (a few milliseconds) and read with numpy: its 18-byte header, then its BGR(A) rows."""
+    (a few milliseconds) and read with numpy: its 18-byte header, then its BGR(A) rows. Windows' OCP
+    saves a picture to a file but to no stream, so there the TGA is handed over through a temporary
+    file instead."""
     from OCP.TCollection import TCollection_AsciiString
 
     stream = io.BytesIO()
-    if not image.Save(stream, TCollection_AsciiString("tga")):
-        raise RuntimeError("OCCT could not hand its picture over")
-    data = stream.getvalue()
+    if image.Save(stream, TCollection_AsciiString("tga")):
+        data = stream.getvalue()
+    else:
+        handle, path = tempfile.mkstemp(suffix=".tga")
+        os.close(handle)
+        try:
+            if not image.Save(TCollection_AsciiString(path)):
+                raise RuntimeError("OCCT could not hand its picture over")
+            with open(path, "rb") as saved:
+                data = saved.read()
+        finally:
+            os.remove(path)
     kind = data[2]
     width, height, depth, descriptor = struct.unpack_from("<HHBB", data, 12)
     if kind != 2 or depth not in (24, 32):

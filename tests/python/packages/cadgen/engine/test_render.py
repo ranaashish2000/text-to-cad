@@ -211,6 +211,22 @@ class ContextTest(unittest.TestCase):
         self.addCleanup(second.close)
         self.assertIs(first.driver.GetDisplayConnection(), second.driver.GetDisplayConnection())
 
+    def test_a_picture_saved_to_no_stream_is_handed_over_through_a_file(self) -> None:
+        # Windows' OCP saves a picture to a file but to no stream (#709): every still failed there,
+        # and available() called a working GPU "no GPU driver".
+        from OCP.Image import Image_AlienPixMap, Image_Format
+
+        picture = Image_AlienPixMap()
+        picture.InitZero(Image_Format.Image_Format_RGB, 4, 2, 0, 0)
+
+        class FileOnly:
+            def Save(self, *where):  # (stream, extension) or (path)
+                return False if len(where) == 2 else picture.Save(*where)
+
+        found = context.pixels(FileOnly())
+        self.assertEqual(found.shape, (2, 4, 3))
+        self.assertFalse(found.any())
+
     def test_a_canvas_draws_at_the_size_asked_whatever_its_window(self) -> None:
         gl()
         canvas = context.Canvas(64, 48)
