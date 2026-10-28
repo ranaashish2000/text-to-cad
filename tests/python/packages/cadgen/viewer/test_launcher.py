@@ -28,8 +28,10 @@ class LauncherTest(unittest.TestCase):
         (self.dist / 'assets').mkdir()
         (self.dist / 'assets' / 'app.js').write_text('export {}', encoding='utf-8')
         self.env = engine_daemon.watched({**os.environ, 'CADGEN_ENGINE_DIR': str(self.root / 'engine'),
-                   'CADGEN_STATE_DIR': str(self.root / 'state'), 'CADGEN_ENGINE_MESH': 'inline'}, self.addCleanup)
+                   'CADGEN_STATE_DIR': str(self.root / 'state'), 'CADGEN_ENGINE_MESH': 'inline',
+                   'CADGEN_PORT': str(engine_daemon.free_port())}, self.addCleanup)
         self.addCleanup(self.stop_engine)
+        engine_daemon.bootstrap(self.env)
 
     def stop_engine(self):
         pid = engine_daemon.engine_pid(self.env)
@@ -85,7 +87,7 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(json.loads(data)['pid'], first['pid'])
         # Both launchers have exited; the shared server still serves the page.
         self.assertEqual(self.get(first, '/')[0], 200)
-        self.assertIn('already serves', self.launch('--port', str(first['port']+1), ok=False))
+        self.assertIn('no cadgen server is running', self.launch('--port', str(engine_daemon.free_port()), ok=False))
 
     def test_a_file_launched_lands_on_its_id_and_old_links_land_home(self):
         from cadgen.engine.ids import file_id
@@ -221,4 +223,4 @@ def setUpModule() -> None:
     # (``engine_daemon.isolate``); each test still names its own engine folder.
     from tests.python.support import engine_daemon
 
-    engine_daemon.isolate(unittest.addModuleCleanup)
+    engine_daemon.isolate(unittest.addModuleCleanup, start=False)

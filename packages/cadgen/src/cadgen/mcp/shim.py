@@ -56,7 +56,7 @@ class Holder:
     """This server's hold on the engine (``cadgen.engine.client.hold``): taken as the server starts,
     starting the engine when none runs, and kept while the host runs, so a shell the host runs in a
     sandbox that cannot start an engine always finds one. Once the host has quit, and this process
-    with it, the engine runs on unheld until it is stopped or a newer installation retires it. An
+    with it, the engine runs on until explicitly stopped. An
     engine that goes while held (``cadgen stop``, a crash) is held again at the host's next request,
     never at once: a stop is obeyed."""
 
@@ -76,6 +76,7 @@ class Holder:
 
     def want(self):
         if not self.holding:
+            self.tried.clear()
             self.wanted.set()
 
     def _run(self):
@@ -84,7 +85,7 @@ class Holder:
             self.wanted.wait()
             self.wanted.clear()
             try:
-                connection = hold(host=self.host, holder=self.ident)
+                connection = hold(start=True, host=self.host, holder=self.ident)
             except Exception as error:  # noqa: BLE001 - held again at the next request; the thread lives
                 LOG.info('could not hold the engine: %s', error)
                 self.tried.set()
@@ -124,6 +125,7 @@ class Proxy:
     def _send(self, message, session, *, fresh=False):
         if self.holder is not None:
             self.holder.want()
+            self.holder.tried.wait(60)
         headers = {'Content-Type': 'application/json', 'Accept': 'application/json, text/event-stream'}
         if session:
             headers['Mcp-Session-Id'], headers['MCP-Protocol-Version'] = session
@@ -225,7 +227,7 @@ class Proxy:
             # The session's end, told to the engine that holds it: never an engine started to hear it
             # (a host closing after `cadgen stop` would start one up for nothing).
             try:
-                self.client.call('DELETE', '/mcp', headers={'Mcp-Session-Id': ident}, start=False)
+                self.client.call('DELETE', '/mcp', headers={'Mcp-Session-Id': ident})
             except OSError:
                 pass
 
@@ -260,8 +262,7 @@ def serve(argv=None):
         reading.join(5)
         return found.get('host')
 
-    # The engine up and held from the start, not from the first card; the hold names the host once
-    # it is read, so the `cadgen` command in that host's shells runs this installation.
+    # Bootstrap the selected server at MCP startup and keep this host's sessions attached to it.
     holder = Holder(host=lambda: family(launched()))
     holder.start()
 

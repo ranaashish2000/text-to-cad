@@ -62,7 +62,7 @@ class VerbsTest(unittest.TestCase):
         cls.addClassCleanup(shutil.rmtree, cls.folder, True)
         engine = Path(tempfile.mkdtemp(prefix="eng-", dir="/tmp" if os.name != "nt" else None)).resolve()
         cls.addClassCleanup(shutil.rmtree, engine, True)
-        cls.env = engine_daemon.watched({**os.environ, "PYTHONPATH": str(SRC), "CADGEN_ENGINE_DIR": str(engine),
+        cls.env = engine_daemon.started({**os.environ, "PYTHONPATH": str(SRC), "CADGEN_ENGINE_DIR": str(engine),
                                          "CADGEN_STATE_DIR": str(cls.folder / "state"),
                                          "CADGEN_CACHE_DIR": str(cls.folder / "cache"),
                                          "CADGEN_ENGINE_MESH": "inline"},
@@ -78,7 +78,7 @@ class VerbsTest(unittest.TestCase):
         cls.failed = cls.run_("parts.py")
         with script.open("a", encoding="utf-8") as handle:
             handle.write("# an edit\n")
-        cls.command = f"cadgen run {script}"
+        cls.command = f"python {script}"
 
     @classmethod
     def run_(cls, *args: str):

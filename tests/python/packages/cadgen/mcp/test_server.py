@@ -101,8 +101,7 @@ class _Session(unittest.TestCase):
         # host's page is opened by the stdio peer (``call`` delivers each result as it does), the
         # card's Open in browser by the server (``browser_opener``).
         self.opened: list[str] = []
-        engine = self.tmp / "opener"
-        engine.mkdir(mode=0o700)
+        engine = Path(os.environ["CADGEN_ENGINE_DIR"])
         from cadgen.viewer import browser_open
         for patched in (mock.patch.dict(os.environ, {"CADGEN_ENGINE_DIR": str(engine)}),
                         mock.patch.object(browser_open, "display_refusal", return_value=None)):
@@ -1146,6 +1145,32 @@ class ToolArgumentsTest(unittest.TestCase):
     def call(self, server: Server, name: str, arguments: dict) -> dict:
         return server.handle("tools/call", {"name": name, "arguments": arguments}, RequestContext(1, {"threadId": "t"}))
 
+    def test_initialize_teaches_project_python_matching_release_and_selected_port_in_every_presentation(self) -> None:
+        from cadgen import __version__
+        from cadgen.mcp.server import INSTRUCTIONS, INLINE_INSTRUCTIONS, TEXT_INSTRUCTIONS
+
+        presentation = {"tabs": INSTRUCTIONS, "inline": INLINE_INSTRUCTIONS, "text": TEXT_INSTRUCTIONS}
+        for port in (3245, 54321):
+            with mock.patch.dict(os.environ, {"CADGEN_PORT": str(port)}):
+                for catalog, (client, offered) in CATALOGS.items():
+                    with self.subTest(port=port, presentation=catalog):
+                        server = self.served(catalog)
+                        reply = server.handle("initialize", initialize_params({"capabilities": offered,
+                                              "clientInfo": client}, None), None)
+                        instructions = reply["instructions"]
+                        self.assertIn(f"python -m pip install cadgen=={__version__}", instructions)
+                        self.assertIn(f"uv pip install --python <project-python> cadgen=={__version__}", instructions)
+                        self.assertIn(f"CADGEN_PORT={port}", instructions)
+                        self.assertIn("run `python model.py`", instructions)
+                        self.assertIn("already starts or attaches", instructions)
+                        self.assertIn("no-argument function returning a build123d shape", instructions)
+                        self.assertIn("live document id; pass that id to `cad_show`", instructions)
+                        self.assertTrue(instructions.endswith(presentation[catalog]))
+                        self.assertNotIn("cadgen run", instructions)
+                        sample = instructions.split("```python\n", 1)[1].split("```", 1)[0]
+                        compile(sample, "model.py", "exec")
+                        self.assertIn('if __name__ == "__main__":\n    part()', sample)
+
     def sample(self, key: str, schema: dict):
         """A value the schema takes for ``key``, as an agent would send it."""
         named = {"requestId": "agreement-request-01", "operationId": "operation", "epoch": "epoch", "view": "v",
@@ -1309,7 +1334,7 @@ class ToolArgumentsTest(unittest.TestCase):
         answer = failed["structuredContent"]
         self.assertEqual(answer["state"], "failed")
         self.assertEqual(answer["error"], "l_bracket.py is no document: an export reads an .xbf, a .step, a mesh (.glb, "
-                                          f".stl, .3mf) or a document id; run `cadgen run {script}` first, then export "
+                                          f".stl, .3mf) or a document id; run `python {script}` first, then export "
                                           "its document by id")
         self.assertEqual(answer["result"], {"outputsMayHaveBeenWritten": False})  # refused before the engine was asked
 

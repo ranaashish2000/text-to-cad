@@ -24,10 +24,8 @@ const tomlTargets = [
   "packages/cadgen/pyproject.toml",
 ];
 
-// Every skill that runs cadgen names the version the server's installation registers as
-// (`cadgen +<version>`, run by the `cadgen` command it writes, and "it says <version> is not
-// installed") and the command that installs it (`uvx ... --from cadgen==<version> cadgen doctor`) in
-// its SKILL.md, pinned like the server's so the two share one installation.
+// Skills pin CLI/bootstrap commands and the project Python dependency to the same release.
+// The project interpreter stays separate; exact release equality lets its workers use the server.
 function skillLaunchTargets() {
   const skills = path.join(repoRoot, "skills");
   if (!existsSync(skills)) {
@@ -35,9 +33,10 @@ function skillLaunchTargets() {
   }
   return readdirSync(skills, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
-    .map((entry) => `skills/${entry.name}/SKILL.md`)
+    // Runtime setup has one dedicated guide; historical migration examples stay untouched.
+    .flatMap((entry) => ["SKILL.md", "references/setup.md"].map((file) => `skills/${entry.name}/${file}`))
     .filter((relative) => existsSync(path.join(repoRoot, relative)))
-    .filter((relative) => readFileSync(path.join(repoRoot, relative), "utf8").includes("--from cadgen=="))
+    .filter((relative) => /cadgen(?:\[[a-z0-9_,.-]+\])?==|cadgen(?:\.cmd)? \+\d/.test(readFileSync(path.join(repoRoot, relative), "utf8")))
     .sort();
 }
 
@@ -52,6 +51,7 @@ export const pinTargets = [
   "mcp.json",
   "gemini-extension.json",
   "README.md",
+  "packages/cadgen/README.md",
   // The turn-off command the README and the docs site print, the plugin's own launch line.
   "apps/docs/src/lib/content.ts",
   "apps/docs/src/app/privacy-policy/page.tsx",
@@ -208,15 +208,15 @@ function syncTomlTarget(relativePath, version) {
 
 // A skill runs its version by the `cadgen` command (`cadgen +0.8.0`), and says it in the
 // command's refusal ("it says 0.8.0 is not installed").
-export const skillVersionPattern = /(cadgen \+|it says )(\d[^\s`"'\\)]*)/g;
+export const skillVersionPattern = /(cadgen(?:\.cmd)? \+|it says )(\d[^\s`"'\\)]*)/g;
 
 function syncPinTarget(relativePath, version, text = readRequiredText(relativePath)) {
-  const pin = /(cadgen(?:\[[a-z0-9_,.-]+\])?==)([^"\s]+)/g;
+  const pin = /(cadgen(?:\[[a-z0-9_,.-]+\])?==)([^"'`\s]+)/g;
   const matches = [...text.matchAll(pin)];
-  if (matches.length === 0) {
-    throw new Error(`${relativePath} must pin cadgen==<version>`);
-  }
   const named = [...text.matchAll(skillVersionPattern)];
+  if (matches.length === 0 && named.length === 0) {
+    throw new Error(`${relativePath} must pin cadgen==<version> or cadgen +<version>`);
+  }
   const labels = [];
   if (!matches.every((match) => match[2] === version)) {
     labels.push("cadgen pin");

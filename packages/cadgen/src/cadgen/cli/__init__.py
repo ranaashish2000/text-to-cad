@@ -28,8 +28,7 @@ import sys
 # Two-word names are intentional where a noun has several verbs. Dispatch joins
 # argv[0:2] before argv[0], so the two-word form wins where it exists.
 #
-# A model script builds by running it (``python <model>.py``, or ``cadgen run <model>.py`` with this
-# installation's python): no command takes its place.
+# A model script builds with the project interpreter: ``python <model>.py``.
 _COMMANDS: dict[str, tuple[str, str]] = {
     # The engine (cadgen.engine): documents exported, drawn and served, its server.
     "export": ("cadgen.cli.export", "write an .xbf or a .step to STEP, GLB, STL, 3MF, DXF or xbf"),
@@ -49,10 +48,9 @@ _COMMANDS: dict[str, tuple[str, str]] = {
     "sdf snapshot": ("cadgen.cli.sdf_snapshot", "render an SDF to an image"),
     "srdf validate": ("cadgen.cli.srdf_validate", "validate an SRDF against its URDF"),
     # Generic / services
-    "run": ("cadgen.cli.run", "run a model script (or -m, -c) with this installation's python"),
-    "doctor": ("cadgen.cli.doctor", "install: register, write the cadgen command, start the engine"),
-    # A page session on the installation engine; the launcher exits.
-    "viewer": ("cadgen.cli.viewer", "open a viewer page on the installation engine"),
+    "doctor": ("cadgen.cli.doctor", "install: register, write the cadgen command, check the environment"),
+    # A page session on the selected engine; the launcher exits.
+    "viewer": ("cadgen.cli.viewer", "open a viewer page on the selected engine"),
     # CAD inside an agent host's panels. The host starts a stateless stdio peer per session.
     "mcp": ("cadgen.cli.mcp", "serve CAD to an agent host over MCP (stdio)"),
     "telemetry": ("cadgen.cli.telemetry", "show or change the usage stats and crash reports CAD sends: status, on, off"),
@@ -218,7 +216,9 @@ def _main(argv: list[str] | None) -> int:
     # No command says a newer text-to-cad is out: it cannot tell which plugin, if any, it came
     # with, so the CAD app and the CAD Viewer say it (`cadgen/updates.py`). What a command does say,
     # once and before its work, is what those two send by default (`cadgen/analytics.py`).
-    if command not in _UNTOLD:
+    diagnostic = command == "doctor" and any(arg == "--json" or arg == "--python" or arg.startswith("--python=")
+                                              for arg in rest)
+    if command not in _UNTOLD and not diagnostic:
         _tell()
     try:
         return _run(command, entry[0], rest)
@@ -244,9 +244,8 @@ def _report(error: Exception) -> None:
 
 
 # Commands that never carry the analytics notice: a CAD app's server, whose output only the host's log
-# reads; the engine's server, writing nowhere; `telemetry`, which says it its own way; and `run`, which is
-# only the python it runs, as the `cadgen` command's `run` is.
-_UNTOLD = frozenset({"mcp", "server", "telemetry", "run"})
+# reads; the engine's server; and `telemetry`, which says it its own way.
+_UNTOLD = frozenset({"mcp", "server", "telemetry"})
 
 
 def _tell() -> None:

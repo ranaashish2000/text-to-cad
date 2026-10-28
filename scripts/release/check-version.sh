@@ -10,9 +10,8 @@ Usage:
   scripts/release/check-version.sh [--incremented-from REF]
 
 Checks that VERSION contains a valid canonical release version and that every
-skill's SKILL.md names exactly that version: its install command
-(`uvx ... --from cadgen==<version> cadgen doctor`) and the version it runs
-(`cadgen +<version>`, "it says <version> is not installed"). main is
+skill's SKILL.md and dedicated setup guide name exactly that version in bootstrap and project Python
+installation pins (`cadgen==<version>`) and CLI commands (`cadgen +<version>`). main is
 the source branch AND what installers clone, so a stale pin ships.
 With --incremented-from, also checks that the current version is greater than
 the version at REF (a commit, branch, or release tag -- `v0.5.0` or the bare
@@ -75,14 +74,14 @@ while IFS= read -r skill; do
       echo "$skill pins cadgen==$pin; expected cadgen==$version" >&2
       stale=1
     fi
-  done < <(grep -oE -- '--from cadgen==[^[:space:]`]+' "$skill" | sed 's/.*==//')
+  done < <(grep -oE -- 'cadgen==[^[:space:]`"'"'"']+' "$skill" | sed 's/.*==//')
   while IFS= read -r named; do
     if [ "$named" != "$version" ]; then
       echo "$skill runs cadgen +$named; expected +$version" >&2
       stale=1
     fi
-  done < <(grep -oE -- '(cadgen \+|it says )[0-9][^[:space:]`)]*' "$skill" | sed -E 's/^(cadgen \+|it says )//')
-done < <(find skills -mindepth 2 -maxdepth 2 -name SKILL.md -type f | sort)
+  done < <(grep -oE -- '(cadgen(\.cmd)? \+|it says )[0-9][^[:space:]`)]*' "$skill" | sed -E 's/^(cadgen(\.cmd)? \+|it says )//')
+done < <(find skills -mindepth 2 -maxdepth 3 -type f \( -name SKILL.md -o -path '*/references/setup.md' \) | sort)
 if [ "$stale" -ne 0 ]; then
   echo "Run node scripts/release/sync-version.mjs to stamp the pins from VERSION." >&2
   exit 1

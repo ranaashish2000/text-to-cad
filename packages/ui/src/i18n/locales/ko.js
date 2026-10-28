@@ -10,7 +10,7 @@ export default {
 
   "app.start.notAnswering": "CAD 뷰어가 응답하지 않습니다",
   "app.engine.notRunning": "엔진이 실행 중이 아닙니다. 다시 실행되면 페이지가 다시 연결됩니다.",
-  "app.engine.startIt": "cadgen run <script>.py 또는 cadgen viewer를 실행해 시작하세요.",
+  "app.engine.startIt": "cadgen server를 실행해 시작하세요.",
   "app.engine.linkReplaced": "이 페이지의 링크가 바뀌었습니다. 새 링크를 열면 페이지가 다시 연결됩니다.",
   "app.engine.openNewLink": "cadgen viewer를 실행하고 출력된 링크를 여세요.",
 

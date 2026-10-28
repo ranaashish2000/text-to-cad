@@ -2,11 +2,33 @@
 
 The page an agent host renders for CAD: the same `@text-to-cad/ui` FileViewer and
 renderers `apps/web` composes, behind a different host — an MCP Apps bridge
-instead of an HTTP origin. The installation's engine serves its tools, page resource and HTTP routes.
+instead of an HTTP origin. The engine selected by `CADGEN_PORT` (default 3245) serves
+its tools, page resource and HTTP routes. The persistent document library, cached bytes,
+Recents and thumbnails are shared across ports.
+Preferences, installation records and the user's page token remain shared.
 `cadgen mcp` is the stateless stdio shim that agent hosts launch: it ensures that
 engine, then forwards JSON-RPC to `/mcp` using its installation token. Each shim
 negotiates a separate MCP session. Closing a shim releases that session and leaves
 the engine, its workers and other clients alive.
+
+Codex marks this MCP server as required and allows 300 seconds for cold startup.
+It waits for initialization; a failed download, connection or bootstrap blocks session
+startup or resume, including unrelated work while CAD is enabled. Fix the server or
+disable the CAD MCP server/plugin before continuing without it. Other hosts retain their
+own startup behavior.
+
+Diagnose setup and version conflicts from the local shell with
+`cadgen doctor --json --python <project-python>`. Its read-only report includes
+discoverable provider configuration, registered installations, project identity
+and known engines. It works independently of a successful MCP session, so the
+same command is available to skills and to a person troubleshooting host startup.
+
+Every presentation's initialization instructions explain project authoring as well as viewing:
+install the server's exact cadgen release in the chosen project Python environment, set
+`CADGEN_PORT` to the server's selected port, run a no-argument `@model` with that interpreter,
+and pass its printed document id to `cad_show`. The instructions include pip and no-pip uv
+installation commands and a minimal runnable model. MCP owns engine bootstrap; project
+scripts attach to it and use their own dependencies.
 
 Hosts present it in one of two ways, which `initialize` selects (`cadgen/mcp/host.py`):
 a host can declare the `dev.texttocad/tabs` extension with the `global`, `thread` and `file`
@@ -441,4 +463,6 @@ same view through the document version stream.
 
 The stdio peer exits with its host session; it deletes only that MCP session.
 There is no viewer subprocess or file-backed sidebar registry to clean up.
-Restart the installation engine explicitly after editing its Python source.
+MCP bootstrap starts or attaches to the selected engine and requires the same cadgen
+release. Model clients only attach; project workers use the caller's interpreter.
+Restart your own selected engine explicitly after editing its Python source.

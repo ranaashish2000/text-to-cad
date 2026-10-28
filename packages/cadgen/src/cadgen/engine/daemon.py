@@ -1,7 +1,6 @@
-"""The engine daemon: one per installation, started on demand, and never stopped by a timer: it
-stops on ``cadgen stop`` (or a terminate), when a newer installation's engine retires it
-(``bind``: only while nothing uses it), when its door is gone and no one can reach it (``tend``),
-and with the machine. Idleness sheds memory instead.
+"""An explicitly started engine on one selected loopback port, never stopped by a timer.
+It stops on ``cadgen stop``, a terminate, or when its private door is gone (``tend``).
+Clients attach by port and exact release. Idleness sheds memory instead.
 
 It holds a pool of warm workers, one per model script (``Pool``), and hands each build to its
 script's worker: one build at a time per worker, builds of different scripts at once, and at
@@ -73,6 +72,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from cadgen.engine import runtime
 from cadgen.engine.atomic_replace import replace_atomic
 from cadgen.engine.ids import canonical, file_id, is_id
 
@@ -90,24 +90,14 @@ TEND_SECONDS = 30.0
 PRESSURE_SHARE = 0.5
 # The standby's name where a worker's script would be (``Pool.stand``): it builds no script yet.
 STANDBY = "standby"
-# The engine's HTTP port when nothing names one (0xCAD): ``--port`` on ``cadgen server`` (or a
-# request's own), then ``CADGEN_ENGINE_PORT``, then the installation's remembered port, then this
-# (``bind``). Held by another program, the engine rolls to the next free port and remembers it.
+# The HTTP port when neither --port nor CADGEN_PORT selects one (0xCAD).
 DEFAULT_PORT = 3245
-# A test suite's own "default" (``default_port``), so no test binds or rolls from the machine's 3245.
-DEFAULT_PORT_ENV = "CADGEN_ENGINE_DEFAULT_PORT"
-# How many ports past a held default (or remembered) one the engine tries before any free one.
-PORTS_TRIED = 64
-# How long the engine waits for another installation's engine it asked to stop to let its port go.
-RETIRE_SECONDS = 10.0
-# How long the engine waits for another installation's engine to answer what it is using.
-ASK_SECONDS = 5.0
 # The version an installation that cannot know its own name runs as (a development install's
 # ``<version>-dev.<time>``, set by its launcher and the ``cadgen`` command): the name its records
 # and its engine's ``status`` give it (``installation``). The engine reads the variable, never the
 # distribution's module that sets it (law 3).
 INSTALLATION_ENV = "CADGEN_INSTALLATION_VERSION"
-PROTOCOL = 3  # 3: the door (named pipes) in place of the Unix socket
+PROTOCOL = 4  # explicit port selection and an exact-release, instance-bound handshake
 WINDOWS = os.name == "nt"
 # The retirements ``status`` lists, the latest first.
 RETIRED_KEPT = 12
@@ -267,20 +257,9 @@ def _users_own(folder: str) -> bool:
     return stat.S_ISDIR(found.st_mode) and found.st_uid == os.getuid() and not found.st_mode & 0o022
 
 
-def _tag(protocol: int | None = None, *, versioned: bool = True) -> str:
-    """One daemon per installation: its environment, its interpreter's version and the engine it
-    runs -- never the name the interpreter was started by (``python``, ``python3``, ``python3.12``
-    of one environment are one installation) -- the protocol it speaks (``PROTOCOL``, else
-    ``protocol``: an older one's daemon, which ``stop`` still finds), and the version it runs as
-    (``installation``). So an upgrade into the same environment (``pip install -U``, ``uv tool
-    upgrade``, a development install made again) has a door, lock and port file of its own: its
-    clients start its engine, never dial the old one still running there, and that start retires
-    the old one when nothing uses it (``retire_older``). ``versioned=False``: the environment alone,
-    which keys what outlives an upgrade in it -- its engine record, the port it rolled to (``bind``)."""
-    prefix = os.path.normcase(os.path.realpath(sys.prefix))
-    material = (f"{prefix}|{sys.implementation.cache_tag}|{Path(__file__).resolve().parent}|"
-                f"{PROTOCOL if protocol is None else protocol}" + (f"|{installation()}" if versioned else ""))
-    return hashlib.sha256(material.encode()).hexdigest()[:12]
+def _tag(protocol: int | None = None, *, versioned: bool = True, port: int | None = None) -> str:
+    """Private endpoint for the selected port, independent of Python or cadgen installation."""
+    return hashlib.sha256(f"cadgen-port|{selected_port() if port is None else port}".encode()).hexdigest()[:12]
 
 
 def folder_refusal(folder: Path) -> str | None:
@@ -358,11 +337,8 @@ class Endpoint:
 
 
 def endpoints() -> list[Endpoint]:
-    """Every daemon this installation may have running, this protocol's first and then each older
-    one's (``_tag``): the files ``stop`` looks at, in the engine folder. A protocol bump never
-    strands a daemon that has a door (protocol 3 on); one of an earlier protocol listened on a
-    socket, which nothing reaches now, and leaves on that older cadgen's own idle timeout."""
-    return [Endpoint(protocol, address(protocol), lock_path(protocol)) for protocol in range(PROTOCOL, 0, -1)]
+    """Only the selected port's daemon; stop never discovers a different server to stop."""
+    return [Endpoint(PROTOCOL, address(), lock_path())]
 
 
 def engine_root() -> str:
@@ -420,21 +396,26 @@ builds no script until a build takes it (``adopt``)."""
     def __init__(self, script: str, environment: dict[str, str], cwd: str | None = None,
                  on_progress: Callable[["Worker", dict[str, Any]], None] = lambda _worker, _frame: None,
                  on_saved: Callable[["Worker", dict[str, Any], bytes], None] = lambda _worker, _header, _payload: None,
-                 standby: bool = False) -> None:
+                 standby: bool = False, execution: dict[str, Any] | None = None) -> None:
+        self.execution = execution or runtime.describe(environment)
+        runtime.validate(self.execution)
         self.script = script
         self.environment = environment
         env = dict(environment)
-        path = env.get("PYTHONPATH", "")
-        root = engine_root()
-        if root not in path.split(os.pathsep):
-            env["PYTHONPATH"] = os.pathsep.join(item for item in (root, path) if item)
         # The daemon's bytecode, whoever's run starts the worker: it serves every later run too.
         own = {name: os.environ[name] for name in BYTECODE if name in os.environ}
         env = {name: value for name, value in env.items() if name not in BYTECODE}
         env.update(own or bytecode({}))
         env["CADGEN_ENGINE_WORKER"] = "1"
-        self.process = subprocess.Popen([sys.executable, "-P", "-m", "cadgen.engine.worker",
-                                         *(["--standby"] if standby else [])], stdin=subprocess.PIPE,
+        command = [self.execution["python"], "-P"]
+        if self.execution["checkout"]:
+            # Explicit source-checkout support: the caller's import root, verified by the ready
+            # handshake, never this daemon's code injected into another installed environment.
+            command += ["-c", "import runpy,sys;sys.path.insert(0,sys.argv.pop(1));"
+                        "runpy.run_module('cadgen.engine.worker',run_name='__main__')", self.execution["root"]]
+        else:
+            command += ["-m", "cadgen.engine.worker"]
+        self.process = subprocess.Popen([*command, *(["--standby"] if standby else [])], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                                         cwd=cwd or str(Path(script).parent), **windowless())
         self.lock = threading.Lock()
@@ -456,18 +437,32 @@ builds no script until a build takes it (``adopt``)."""
         self.builds = 0
         # Its place in the pool (``Pool``): its key, whether a request holds it, since when, and
         # when it was last let go; its resident memory at its start and after its last build, in MiB.
-        self.key = os.path.normcase(script)
+        self.key = runtime.key(script, execution)
         self.leased = False
         self.since = 0.0
         self.used = time.monotonic()
         self.rss: float | None = None
         # Over its memory cap after a build (``worker.retirement``): it exits, and is never asked again.
         self.retired = False
-        threading.Thread(target=self._stderr, daemon=True).start()
-        threading.Thread(target=self._reader, daemon=True).start()
+        self.startup_logs: collections.deque[str] = collections.deque(maxlen=12)
+        self.errors = threading.Thread(target=self._stderr, daemon=True)
+        self.errors.start()
+        self.reading = threading.Thread(target=self._reader, daemon=True)
+        self.reading.start()
         ready = self.answers.get()
         if ready is None or "ready" not in ready:
-            raise WorkerGone(f"the worker for {script} did not start")
+            self.errors.join(timeout=5)
+            self.stop()
+            detail = "\n".join(self.startup_logs)
+            raise WorkerGone(f"the worker for {script} did not start" + (f": {detail}" if detail else ""))
+        try:
+            actual = runtime.validate(ready.get("execution"))
+            if actual != self.execution:
+                fields = ", ".join(name for name in self.execution if actual.get(name) != self.execution[name] and name != "fingerprint")
+                raise ValueError(f"the worker's actual Python environment differs from the model's request ({fields})")
+        except ValueError:
+            self.stop()
+            raise
         self.pid = ready["ready"]
         self.rss = ready.get("rssMb")
 
@@ -477,7 +472,8 @@ builds no script until a build takes it (``adopt``)."""
         script's, or ``cwd``), as if started for it. Its next request adopts the run's environment
         as every request does (``worker.adopt``)."""
         self._write({"op": "adopt", "home": os.path.abspath(cwd or str(Path(script).parent))})
-        self.script, self.environment, self.key = script, environment, os.path.normcase(script)
+        self.script, self.environment = script, environment
+        self.key = runtime.key(script, self.execution)
         self.started = time.time()
 
     def _tell(self, message: dict[str, Any]) -> None:
@@ -497,6 +493,8 @@ builds no script until a build takes it (``adopt``)."""
     def _stderr(self) -> None:
         assert self.process.stderr is not None
         for line in iter(self.process.stderr.readline, b""):
+            if hasattr(self, "startup_logs"):
+                self.startup_logs.append(line.decode("utf-8", "replace").rstrip("\n"))
             self._tell({"log": line.decode("utf-8", "replace").rstrip("\n"), "stream": "model"})
 
     def _reader(self) -> None:
@@ -617,14 +615,19 @@ builds no script until a build takes it (``adopt``)."""
             self.process.wait(timeout=5)
         except Exception:  # noqa: BLE001
             self.process.kill()
+            self.process.wait()
+        finally:
+            for thread in (self.errors, self.reading):
+                if thread is not threading.current_thread():
+                    thread.join(timeout=5)
+            for stream in (self.process.stdout, self.process.stderr):
+                if stream is not None:
+                    stream.close()
 
 
 # The requests that serve (``Daemon.serve``: the HTTP server bound on the first), each counted busy
 # while it is underway (``Daemon.handle``).
 SERVING = frozenset({"serve", "viewer", "http", "read", "warm"})
-# The type a worker answers bytes of a held document that do not read with (``build.Unreadable``),
-# as ``worker.refusal`` names it.
-UNREADABLE = "cadgen.engine.build:Unreadable"
 
 
 def refused(error: Exception) -> dict[str, Any]:
@@ -667,6 +670,7 @@ class _Ticket:
     start: bool = False
     victim: Any = None
     standby: Any = None
+    execution: dict[str, Any] | None = None
     awaits: bool = False  # it waits for the standby being started (``Pool._grant``)
 
     @property
@@ -700,7 +704,7 @@ class Pool:
     and no script (``stand``). ``renders``, when the daemon sets it, is its render processes
     (``render.service.Renders``), counted with the workers and retired by the same rule."""
 
-    def __init__(self, cap: int, start: Callable[[str, dict[str, str], str | None], Any],
+    def __init__(self, cap: int, start: Callable[..., Any],
                  connected: Callable[[Any], bool] = lambda worker: False,
                  drain: Callable[[Any], None] = lambda worker: None,
                  memory: Callable[[], float | None] = lambda: None) -> None:
@@ -709,7 +713,7 @@ class Pool:
         self.connected = connected
         self.drain = drain
         self.memory = memory
-        self.spare: Callable[[dict[str, str]], Any] | None = None
+        self.spare: Callable[..., Any] | None = None
         # Whether the system is under memory pressure now (the daemon's ``serve.Pressure``): no
         # standby is started under it, which ``shed`` would retire at its next look.
         self.pressed: Callable[[], bool] = lambda: False
@@ -721,20 +725,22 @@ class Pool:
         self.retired: collections.deque = collections.deque(maxlen=RETIRED_KEPT)
         # The standby (``stand``): ready, or being started in the environment given; either holds a slot.
         self.standby: Any = None
+        self.readying_execution: dict[str, Any] | None = None
         self.readying: dict[str, str] | None = None
         self.standby_mb: float | None = None  # the last standby's memory once ready: the room a next one needs
         # The environment of a build that started a worker of another interpreter while the standby
         # was being started: the standby, once ready, is replaced by one of it.
+        self.follow_execution: dict[str, Any] | None = None
         self.follow: dict[str, str] | None = None
         self.stopped = False
 
     def lease(self, script: str, environment: dict[str, str], cwd: str | None = None,
-              loading: Callable[[str], None] | None = None) -> Any:
+              loading: Callable[[str], None] | None = None, execution: dict[str, Any] | None = None) -> Any:
         """The worker of ``script`` for one request, waiting its turn (see the class); started
         when it has none, or the standby taken for it. ``release`` it after. A request still waiting
         for the standby being started after ``worker.KERNEL_PATIENCE`` -- its kernel's first load on a
         fresh installation -- is said to ``loading``, once, while it waits (``worker.KERNEL_NOTICE``)."""
-        ticket = _Ticket(os.path.normcase(script), environment, cwd)
+        ticket = _Ticket(runtime.key(script, execution), environment, cwd, execution=execution)
         told = None
         with self.lock:
             self.queue.append(ticket)
@@ -762,7 +768,12 @@ class Pool:
         if ticket.victim is not None:
             self._stop(ticket.victim)  # the worker whose slot this is exits before the new one starts
         try:
-            worker = self._adopted(ticket, script) or self.start(script, environment, cwd)
+            worker = self._adopted(ticket, script)
+            if worker is None:
+                worker = self.start(script, environment, cwd, execution) if execution is not None else self.start(script, environment, cwd)
+            worker.key = ticket.key
+            if execution is not None:
+                worker.execution = execution
         except BaseException:
             with self.lock:
                 self.starting.discard(ticket.key)
@@ -775,15 +786,18 @@ class Pool:
             # A worker of another interpreter's started: the standby follows the latest caller's, now
             # or once it is ready.
             other = self.standby if ticket.standby is None and self.standby is not None and \
-                interpreter(self.standby.environment) != interpreter(environment) else None
+                (interpreter(self.standby.environment) != interpreter(environment)
+                 or (execution is not None and getattr(self.standby, "execution", None) != execution)) else None
             if other is not None:
                 self.standby = None
             elif ticket.standby is None and self.readying is not None and \
-                    interpreter(self.readying) != interpreter(environment):
+                    (interpreter(self.readying) != interpreter(environment)
+                     or (execution is not None and self.readying_execution != execution)):
                 self.follow = dict(environment)
+                self.follow_execution = execution
         if other is not None:
             self._stop(other)
-        self.stand(environment)
+        self.stand(environment, execution) if execution is not None else self.stand(environment)
         return worker
 
     def _adopted(self, ticket: _Ticket, script: str) -> Any:
@@ -825,7 +839,7 @@ class Pool:
 
     # --- the standby ---------------------------------------------------------------------
 
-    def stand(self, environment: dict[str, str]) -> None:
+    def stand(self, environment: dict[str, str], execution: dict[str, Any] | None = None) -> None:
         """A standby started in ``environment``, off the caller's thread, when the daemon gave the
         pool one to start (``spare``) and the pool has none, a slot for it under the cap and room
         for it under the memory cap (the last standby's measure), and the system not under memory
@@ -843,20 +857,24 @@ class Pool:
             if cap is not None and self._resident(drawing) + (self.standby_mb or 0.0) > cap:
                 return
             self.readying = dict(environment)
-        threading.Thread(target=self._ready, args=(dict(environment),), name="cadgen-standby", daemon=True).start()
+            self.readying_execution = execution
+        threading.Thread(target=self._ready, args=(dict(environment), execution), name="cadgen-standby", daemon=True).start()
 
-    def _ready(self, environment: dict[str, str]) -> None:
+    def _ready(self, environment: dict[str, str], execution: dict[str, Any] | None = None) -> None:
         """The standby being started (``stand``): ready, it waits for a build; failed, the build
         waiting for it starts a worker of its own."""
         spare = None
         try:
-            spare = self.spare(environment) if self.spare is not None else None
+            if self.spare is not None:
+                spare = self.spare(environment, execution) if execution is not None else self.spare(environment)
         except Exception:  # noqa: BLE001 - no standby: the next build starts its own worker
             spare = None
         with self.lock:
             self.readying = None
+            self.readying_execution = None
             follow, self.follow = self.follow, None
-            if follow is not None and interpreter(follow) == interpreter(environment):
+            following, self.follow_execution = self.follow_execution, None
+            if follow is not None and interpreter(follow) == interpreter(environment) and following == execution:
                 follow = None
             kept = spare is not None and not self.stopped and follow is None
             if kept:
@@ -868,7 +886,7 @@ class Pool:
         if spare is not None and not kept:
             spare.stop()
         if follow is not None:
-            self.stand(follow)
+            self.stand(follow, following) if following is not None else self.stand(follow)
         elif kept:
             self.shed()
 
@@ -1006,14 +1024,16 @@ class Pool:
             if blocked:
                 continue
             same = interpreter(ticket.environment)
-            if self.standby is not None and interpreter(self.standby.environment) == same:
+            if (self.standby is not None and interpreter(self.standby.environment) == same
+                    and (ticket.execution is None or getattr(self.standby, "execution", None) == ticket.execution)):
                 # The standby, of this request's interpreter: its slot and its loaded kernel are the
                 # new worker's.
                 ticket.standby, self.standby = self.standby, None
                 self._slot(ticket, None)
                 granted = True
                 continue
-            if self.readying is not None and not awaited and interpreter(self.readying) == same:
+            if (self.readying is not None and not awaited and interpreter(self.readying) == same
+                    and (ticket.execution is None or self.readying_execution == ticket.execution)):
                 awaited = ticket.awaits = True
                 continue  # the standby being started is this request's once it is ready
             occupied = len(self.live) + len(self.starting) + (self.standby is not None) + (self.readying is not None)
@@ -1058,24 +1078,25 @@ class Pool:
 
 
 def environment_port() -> int | None:
-    """``CADGEN_ENGINE_PORT`` as a port (0: any free one), or None when it names none."""
-    given = os.environ.get("CADGEN_ENGINE_PORT", "").strip()
+    """The explicitly selected server port, or None for the documented default."""
+    given = os.environ.get("CADGEN_PORT", "").strip()
     if not given:
         return None
     try:
         port = int(given)
     except ValueError:
-        raise ValueError(f"CADGEN_ENGINE_PORT={given!r} is not a port") from None
-    if not 0 <= port <= 65535:
-        raise ValueError(f"CADGEN_ENGINE_PORT={given!r} is not a port")
+        raise ValueError(f"CADGEN_PORT={given!r} must be a port between 1 and 65535") from None
+    if not 1 <= port <= 65535:
+        raise ValueError(f"CADGEN_PORT={given!r} must be a port between 1 and 65535")
     return port
 
 
 def default_port() -> int:
-    """``DEFAULT_PORT``, or the port ``CADGEN_ENGINE_DEFAULT_PORT`` names (1-65535): a test's seam,
-    the default it holds or frees without touching the machine's 3245."""
-    given = os.environ.get(DEFAULT_PORT_ENV, "").strip()
-    return int(given) if given.isdigit() and 0 < int(given) <= 65535 else DEFAULT_PORT
+    return DEFAULT_PORT
+
+
+def selected_port() -> int:
+    return environment_port() or DEFAULT_PORT
 
 
 def _held(error: OSError) -> bool:
@@ -1098,9 +1119,7 @@ def _answers(host: str, port: int) -> bool:
 
 
 class PortHeld(ValueError):
-    """The engine's port is another process's (``bind``): ``who`` holds it, in words. A port named
-    (``--port``, ``CADGEN_ENGINE_PORT``) is refused in one line that names the holder; the default
-    or remembered one is rolled from."""
+    """The selected port is held by another process; no other port is attempted."""
 
     def __init__(self, said: str, who: str) -> None:
         super().__init__(said)
@@ -1192,106 +1211,19 @@ def rank(version: Any) -> tuple | None:
                                                  for part in re.split(r"[-_.]", local))))
 
 
-def _standing(status: dict[str, Any]) -> int | None:
-    """How another installation's engine, by its ``status``, ranks against this one: -1 older, 0 the
-    same version, 1 newer; None when it cannot be said. An engine whose ``status`` has no
-    ``installation`` was built before engines said it: older than any that does, whatever its
-    release (a ``0.8.0`` that would outrank every ``0.8.0-dev.*`` build). Else its installation's
-    version (``rank``); one either side cannot parse is older only when its release (``version``)
-    is lower than this one's."""
-    from cadgen.engine.previous import version
-
-    if "installation" not in status:
-        return -1
-    ours, theirs = rank(installation()), rank(status.get("installation") or status.get("version"))
-    if ours is None or theirs is None:
-        ours, theirs = rank(version()), rank(status.get("version"))
-        return -1 if ours is not None and theirs is not None and theirs < ours else None
-    return (theirs > ours) - (theirs < ours)
-
-
-def _uses(status: dict[str, Any]) -> list[str] | None:
-    """What uses another installation's engine, by its ``status``, in words: its holds (an agent
-    host's app server), the pages that watch its documents, its requests; None when its ``status``
-    does not say (one this cadgen cannot ask)."""
-    if not {"watched", "active", "busy"} <= status.keys():
-        return None
-    holders, pages = status.get("holders") or 0, status["watched"]
-    return [f"{count} {noun}{'' if count == 1 else 's'}"
-            for count, noun in ((holders, "app server"), (pages, "open page"),
-                                (status["busy"] + bool(status["active"]), "request")) if count]
-
-
-def retire_older(host: str = "127.0.0.1") -> list[str]:
-    """Every other installation's engine in this engine folder that nothing uses (``_uses``) and that
-    ranks below this installation (``_standing``), asked to stop and waited for until its door and
-    its port are gone (``RETIRE_SECONDS`` at most in all): so an upgrade converges on the newest
-    installation's engine wherever the older one serves, and an older one never retires a newer. A
-    line for each retired, the start's notice (``bind``)."""
-    from cadgen.engine import client
-
-    ours = {_tag(protocol) for protocol in range(1, PROTOCOL + 1)}
-    try:
-        doors = sorted(state_dir().glob("*.port" if WINDOWS else "*.door"))
-    except OSError:
-        return []
-    asked = []
-    for door in doors:
-        if door.stem in ours:
-            continue
-        status = _ask(door, {"op": "status"})
-        if status is None or _uses(status) != [] or _standing(status) != -1:
-            continue
-        if _ask(door, {"op": "stop"}) is None:
-            continue
-        serving = status.get("serving")
-        port = serving.get("port") if isinstance(serving, dict) else None
-        asked.append((door, port, f"retired cadgen {status.get('installation') or status.get('version')}'s idle "
-                                  f"engine (pid {status.get('pid')}) for this newer installation"))
-    deadline = time.monotonic() + RETIRE_SECONDS
-    for door, port, _said in asked:
-        while (client._answering(door) or (port and _answers(host, port))) and time.monotonic() < deadline:
-            time.sleep(0.05)
-    return [said for _door, _port, said in asked]
-
-
 def bind(host: str, asked: int | None, listen: Callable[[int, str], Any]) -> tuple[Any, dict[str, Any]]:
-    """The engine's HTTP server, listening, and where its port came from. ``listen(port, token)``
-    makes it. First every other installation's engine that is older than this one and that nothing
-    uses is retired, wherever it serves (``retire_older``). Then a port named -- ``asked``
-    (``--port``), else ``CADGEN_ENGINE_PORT`` -- is taken or refused by name (``PortHeld``). Else the
-    installation's port: 3245 (``DEFAULT_PORT``) when it is free, else the port it remembers, else
-    the one it rolls to (``_installation_port``). Either way another installation's engine on it that
-    nothing uses and that is not newer is retired for it (``_listen``); a newer one never is. The page
-    token is the user's (``registry.TOKEN``), one for every installation, made by the first engine to
-    start (``_new_token``); one there that cannot be read is refused by name, and nothing is served.
-
-    ``where``: ``source`` (``--port``, ``CADGEN_ENGINE_PORT``, ``default`` or ``rolled``), for a
-    rolled port ``because`` (who holds 3245), and ``notice``, the lines this start says once: each
-    engine it retired, and a move of its port (a roll, or the return to 3245)."""
+    """Bind exactly the selected loopback port; never move or stop another server."""
     from cadgen.engine import registry
 
-    retired = retire_older(host)
+    if host != "127.0.0.1":
+        raise ValueError("the engine listens on 127.0.0.1 only")
+    port = selected_port() if asked is None else asked
+    if not 1 <= port <= 65535:
+        raise ValueError("--port must be between 1 and 65535")
     held = registry.current()
-    environment = _tag(versioned=False)  # the environment's record: its links outlive an upgrade in it
-    record = held.engine(environment) if held is not None else {}
     token = (held.token() if held is not None else None) or _new_token(held)
-    remembered = record.get("port")
-    if asked is not None:
-        server, where = _listen(host, asked, "--port", token, listen), {"source": "--port"}
-    elif (named := environment_port()) is not None:
-        server, where = _listen(host, named, "CADGEN_ENGINE_PORT", token, listen), {"source": "CADGEN_ENGINE_PORT"}
-    else:
-        server, where = _installation_port(host, remembered, token, listen)
-        remembered = server.port if where["source"] == "rolled" else None
-    kept = {"port": remembered} if remembered else {}
-    if held is not None and kept != record:
-        try:
-            held.put_engine(environment, kept)
-        except OSError:
-            pass  # a state folder it cannot write: this start's links work, the next start's are new
-    said = "\n".join([*retired, *([where["notice"]] if where.get("notice") else [])])
-    return server, {**where, "notice": said} if said else where
+    source = "--port" if asked is not None else "CADGEN_PORT" if environment_port() else "default"
+    return _listen(host, port, source, token, listen), {"source": source}
 
 
 def _new_token(held: Any) -> str:
@@ -1314,128 +1246,23 @@ def _new_token(held: Any) -> str:
     return token  # made and removed again, each time it was read: this start's links work
 
 
-def _installation_port(host: str, remembered: int | None, token: str,
-                       listen: Callable[[int, str], Any]) -> tuple[Any, dict[str, Any]]:
-    """The server on the installation's own port, and where it came from (``bind``): 3245 when it is
-    free (a remembered other port forgotten: the one time a link changes), else the remembered port,
-    else -- that one held by anything but another installation's engine nothing uses -- the next
-    free port, ``PORTS_TRIED`` above it and then any (``_roll``), remembered from then on."""
-    default = default_port()
-    first = remembered or default
-    if first != default:
-        server = _free(host, default, token, listen)
-        if server is not None:
-            return server, {"source": "default",
-                            "notice": f"back on the default port {default}: links made on {first} no longer work"}
-    try:
-        server = _listen(host, first, "default", token, listen)
-    except PortHeld as refusal:
-        server = _roll(host, first, token, listen)
-        return server, {"source": "rolled", "because": refusal.who if first == default else _who(default),
-                        "notice": f"{first} is held by {refusal.who}; this installation serves on {server.port} "
-                                  "and keeps it"}
-    if first == default:
-        return server, {"source": "default"}
-    return server, {"source": "rolled", "because": _who(default)}
+def _listen(host: str, port: int, source: str, token: str, listen: Callable[[int, str], Any]) -> Any:
+    import errno
 
-
-def _free(host: str, port: int, token: str, listen: Callable[[int, str], Any]) -> Any:
-    """``listen(port, token)`` when nothing holds ``port``, else None."""
-    if _answers(host, port):  # a listener on every interface lets a loopback bind through
-        return None
     try:
+        if _answers(host, port):
+            raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
         return listen(port, token)
     except OSError as error:
         if not _held(error):
             raise ValueError(f"cannot listen on {host}:{port}: {error.strerror or error}") from None
-    return None
-
-
-def _roll(host: str, held: int, token: str, listen: Callable[[int, str], Any]) -> Any:
-    """The server on the first free port past ``held``, ``PORTS_TRIED`` at most, else on any."""
-    for port in range(held + 1, min(held + 1 + PORTS_TRIED, 65536)):
-        server = _free(host, port, token, listen)
-        if server is not None:
-            return server
-    try:
-        return listen(0, token)
-    except OSError as error:
-        raise ValueError(f"cannot listen on {host}: {error.strerror or error}") from None
-
-
-def _listen(host: str, port: int, source: str, token: str, listen: Callable[[int, str], Any]) -> Any:
-    """``listen(port, token)``, or ``PortHeld`` when another process holds ``port``. An engine of
-    another installation that nothing uses is retired first (``_holder``), and its port waited for,
-    ``RETIRE_SECONDS`` at most; any other holder is refused at once."""
-    import errno
-
-    deadline = None
-    retired = ""
-    while True:
-        try:
-            if port and _answers(host, port):  # a listener on every interface lets a loopback bind through
-                raise OSError(errno.EADDRINUSE, os.strerror(errno.EADDRINUSE))
-            return listen(port, token)
-        except OSError as error:
-            if not port or not _held(error):
-                raise ValueError(f"cannot listen on {host}:{port}: {error.strerror or error}") from None
-        if deadline is None:
-            retired = _holder(port, source)  # refuses (``PortHeld``) unless it asked an unused engine to stop
-            deadline = time.monotonic() + RETIRE_SECONDS
-        elif time.monotonic() > deadline:
-            raise PortHeld(f"port {port} is held by {retired}, which was asked to stop and still holds it after "
-                           f"{RETIRE_SECONDS:.0f} s: run `cadgen stop` with that version", retired) from None
-        time.sleep(0.1)
-
-
-def _holder(port: int, source: str) -> str:
-    """Who holds ``port``, when it is another installation's engine that nothing uses: asked to
-    stop (its ``stop``), and named. Else ``PortHeld``, naming the holder: that engine and what uses
-    it, one this cadgen cannot ask, or the process the system names (``port_holder``). ``source``:
-    where the port came from (``bind``), which says how to name another."""
-    other = "pass another --port" if source == "--port" else "start cadgen with another CADGEN_ENGINE_PORT"
-    remedy = f"stop it, or {other}"
-    found = _engine_serving(port)
-    if found is not None:
-        address, status = found
-        who = _engine_name(status)
-        uses = _uses(status)
-        if uses is None:
-            raise PortHeld(f"port {port} is held by {who}, which this cadgen cannot ask whether it is in use: "
-                           f"run `cadgen stop` with that version, or {other}", who)
-        if _standing(status) == 1:  # an older installation never retires a newer one's engine
-            raise PortHeld(f"port {port} is held by {who}, a newer installation's, which this one never retires: "
-                           f"use that version, or {other}", who)
-        if uses:
-            then = "quit that app" if (status.get("holders") or 0) else "close that page" if status["watched"] \
-                else "let it finish"
-            raise PortHeld(f"port {port} is held by {who}, still in use by {' and '.join(uses)}: {then} "
-                           "or run `cadgen stop` with that version", who)
-        if _ask(address, {"op": "stop"}) is None:
-            raise PortHeld(f"port {port} is held by {who}, which did not answer when asked to stop: "
-                           "run `cadgen stop` with that version", who)
-        return who
-    pid, name, command = port_holder(port)
-    if pid is None:
-        raise PortHeld(f"port {port} is held by another process: {remedy}", "another process")
-    if _CADGEN.search(command or ""):
-        who = f"another cadgen ({name}, pid {pid})"
-        raise PortHeld(f"port {port} is held by {who}, which this one cannot ask to stop: {remedy}", who)
-    who = f"{name or 'a process'} (pid {pid})"
-    raise PortHeld(f"port {port} is held by {who}: {remedy}", who)
-
-
-def _engine_name(status: dict[str, Any]) -> str:
-    """Another installation's engine, by its ``status``: its installation's version and pid."""
-    version = status.get("installation") or status.get("version")
-    return (f"cadgen {version}'s engine" if version else "another cadgen's engine") + f" (pid {status.get('pid')})"
+    who = _who(port)
+    raise PortHeld(f"port {port} is held by {who}; stop that server explicitly or select another "
+                   "port with --port / CADGEN_PORT", who)
 
 
 def _who(port: int) -> str:
-    """Who holds ``port``, in words, as ``_holder`` names it: never refused, never asked to stop."""
-    found = _engine_serving(port)
-    if found is not None:
-        return _engine_name(found[1])
+    """Who the OS says holds the port; discovery never contacts or retires another engine."""
     pid, name, command = port_holder(port)
     if pid is None:
         return "another process"
@@ -1445,45 +1272,6 @@ def _who(port: int) -> str:
 # A command line that runs cadgen's engine or viewer: ``-m cadgen.…``, or the ``cadgen`` command's
 # ``viewer``, ``server`` or ``mcp``.
 _CADGEN = re.compile(r"(-m\s+cadgen(\.\w+)*|[/\\]cadgen(\.exe)?\s+(viewer|server|mcp))(\s|$)")
-
-
-def _engine_serving(port: int) -> tuple[Path, dict[str, Any]] | None:
-    """The door (on Windows, the port file) of another installation's engine in this engine folder
-    whose HTTP server is on ``port``, and its ``status``; None when no engine there answers so."""
-    ours = {_tag(protocol) for protocol in range(1, PROTOCOL + 1)}
-    try:
-        doors = sorted(state_dir().glob("*.port" if WINDOWS else "*.door"))
-    except OSError:
-        return None
-    for address in doors:
-        if address.stem in ours:
-            continue
-        status = _ask(address, {"op": "status"})
-        serving = (status or {}).get("serving")
-        if isinstance(serving, dict) and serving.get("port") == port:
-            return address, status
-    return None
-
-
-def _ask(address: Path, message: dict[str, Any]) -> dict[str, Any] | None:
-    """``message`` asked of the engine at ``address``: its answer, or None when none answers there
-    within ``ASK_SECONDS`` (a wedged engine never wedges this one)."""
-    from cadgen.engine import client
-
-    answers: list[dict[str, Any]] = []
-
-    def ask() -> None:
-        try:
-            connection = client._connect(address)
-            if connection is not None:
-                answers.append(client._exchange(connection, message, address=address))
-        except (OSError, ValueError):
-            pass
-
-    asking = threading.Thread(target=ask, daemon=True)
-    asking.start()
-    asking.join(ASK_SECONDS)
-    return answers[0] if answers and answers[0].get("ok") else None
 
 
 def port_holder(port: int) -> tuple[int | None, str | None, str | None]:
@@ -1595,14 +1383,12 @@ def others_running() -> list[Path]:
 
 class Daemon:
     def __init__(self, cap: int | None = None, port: int | None = None) -> None:
-        self.port = port  # ``cadgen server --port``: the HTTP port this engine must take, or None
-        self.port_source = ""  # where the HTTP port the server took came from (``bind``)
-        self.port_because = ""  # a rolled port: who holds the default one
-        self.port_notice = ""  # a start that moved the port: the line it says, once (``bind``)
-        # That line when no request of a client bound the port -- a build's page did
-        # (``models.register_page``): the next build's answer says it (``_serve``).
-        self.unsaid = ""
-        self.refusal: PortHeld | None = None  # its named port held by another process: it stops (``serve``)
+        self.port = selected_port() if port is None else port
+        self.instance = secrets.token_urlsafe(24)
+        from cadgen.engine.previous import version
+
+        self.release_version = version()
+        self.port_source = "--port" if port is not None else "CADGEN_PORT" if environment_port() else "default"
         from cadgen.engine.serve import Pressure
         from cadgen.engine.worker import rss_cap_mb
 
@@ -1622,8 +1408,7 @@ class Daemon:
         self.busy = 0
         self.busy_lock = threading.Lock()
         self.stopping = threading.Event()
-        # The connections that hold the engine (``hold``: an agent host's MCP server, while the host
-        # runs): while one is open, no other installation's engine retires this one (``bind``).
+        # The connections that hold MCP sessions while their agent host runs.
         self.holders = 0
         self.hosts: dict[str, int] = {}  # the holders per agent host they serve (``hold``)
         self.door = None  # on POSIX, the door clients reach it by (``door.Door``)
@@ -1675,17 +1460,16 @@ class Daemon:
             env.pop("PYTHONPATH", None)
         return env
 
-    def _spare(self, environment: dict[str, str]) -> Worker:
+    def _spare(self, environment: dict[str, str], execution: dict[str, Any] | None = None) -> Worker:
         """A standby (``Pool.stand``): a worker of no script yet, standing in the daemon's folder."""
         return Worker(STANDBY, environment, cwd=os.getcwd(), on_progress=self.progressed,
-                      on_saved=self.models.cache.saved, standby=True)
+                      on_saved=self.models.cache.saved, standby=True, execution=execution)
 
     def hold(self, reader: Any, send: Callable[[dict[str, Any]], None], host: Any = None, holder: Any = None) -> None:
         """A hold on the engine (``{"op": "hold", "host": ..., "holder": ...}``): answered, then kept until
-        its client goes (its end of file). While any is kept, another installation's engine that wants
-        the port never retires this one: it rolls past it, or refuses a port it was named (``bind``).
+        its client goes (its end of file).
         ``host``, the agent host the holder serves (its MCP server says it), is counted in ``status``
-        (``hosts``): the ``cadgen`` command in that host's shell runs this installation. ``holder``, the
+        (``hosts``). ``holder``, the
         name an MCP server holds with and opens its sessions under: once its client is gone -- a
         server that exits, or one killed before it could say goodbye -- those sessions end
         (``serve.Server.on_hold_end``)."""
@@ -1720,9 +1504,10 @@ class Daemon:
         server = self.server
         return server is not None and any(self.builders.get(ident) is worker for ident in server.watched())
 
-    def _start(self, script: str, environment: dict[str, str], cwd: str | None) -> Worker:
+    def _start(self, script: str, environment: dict[str, str], cwd: str | None,
+               execution: dict[str, Any] | None = None) -> Worker:
         return Worker(script, environment, cwd=cwd, on_progress=self.progressed,
-                      on_saved=self.models.cache.saved)
+                      on_saved=self.models.cache.saved, execution=execution)
 
     def progressed(self, _worker: Worker, frame: dict[str, Any]) -> None:
         """A worker's progress frame (``progress.py``): a build's wakes the pages waiting on the model
@@ -1784,23 +1569,23 @@ class Daemon:
         return f"{error}, at {frame.get('job')}: {describe(frame)}" if frame else str(error)
 
     def lease(self, script: str, environment: dict[str, str], cwd: str | None = None,
-              loading: Callable[[str], None] | None = None) -> Worker:
+              loading: Callable[[str], None] | None = None, execution: dict[str, Any] | None = None) -> Worker:
         """The warm worker of a script (by its path) or of the documents no worker built
         (``documents``), for one request: waiting its turn in the
         pool, started when none is alive (``Pool``); ``loading`` as there. ``release`` it after."""
-        return self.pool.lease(script, environment, cwd, loading)
+        return self.pool.lease(script, environment, cwd, loading, execution)
 
     def release(self, worker: Worker) -> None:
         self.pool.release(worker)
 
-    def behind(self, key: str, send: Callable[[dict[str, Any]], None]) -> tuple[Worker, float] | None:
+    def behind(self, key: str, send: Callable[[dict[str, Any]], None], execution: dict[str, Any] | None = None) -> tuple[Worker, float] | None:
         """A build request that will wait for the build of its script already running (a rerun
         after a client its shell's time limit killed: that build goes on): said to its client at
         once, on stderr, and the running build's progress frames sent on to it until its own turn
         (``Worker.followers``). The worker and how long its build had run; None when none runs.
         Nothing is cancelled."""
         with self.pool.lock:
-            worker = self.pool.live.get(os.path.normcase(key))
+            worker = self.pool.live.get(runtime.key(key, execution))
             began = worker.building if worker is not None and worker.leased else None
             if worker is None or began is None:
                 return None
@@ -1821,40 +1606,22 @@ class Daemon:
         return worker.where(ident, key, kind, ordinal)
 
     def serve(self, request: dict[str, Any]) -> Any:
-        """The daemon's server, started on the first request that needs one."""
+        """The server bound at startup; requests cannot change its address."""
         from cadgen.engine.serve import MESHES, Server, memory_budget
 
+        if request.get("port") is not None and int(request["port"]) != self.port:
+            raise ValueError(f"this server listens on port {self.port}; select it with CADGEN_PORT")
+        if request.get("host") not in (None, "127.0.0.1"):
+            raise ValueError("the engine listens on 127.0.0.1 only")
         started = False
         with self.serving:
-            if self.refusal is not None:
-                raise self.refusal  # stopping: its port is another's
             if self.server is None:
-                host = request.get("host") or "127.0.0.1"
-                try:
-                    self.server, where = bind(
-                        host, int(request["port"]) if request.get("port") else self.port,
-                        lambda port, token: Server(port=port, three=request.get("three"), touch=self.touch,
-                                                   provenance=self.provenance, cache=MESHES, isolated=True, host=host,
-                                                   http_factory=HTTP_FACTORY, budget=memory_budget(), token=token))
-                except PortHeld as refusal:
-                    if request.get("port"):
-                        # The request's own port (``cadgen viewer --port``): that request is refused,
-                        # and the engine -- the builds and warm workers of its other clients -- runs
-                        # on, unbound, for the next request that serves.
-                        raise
-                    # An engine whose own port is held (``cadgen server --port``, its
-                    # ``CADGEN_ENGINE_PORT``) can never serve: it says why and stops, once the
-                    # request that found it has its answer (``_serve``).
-                    self.refusal = refusal
-                    _note(str(refusal))
-                    raise
-                self.port_source, self.port_because = where["source"], where.get("because", "")
-                self.port_notice = where.get("notice", "")
-                if self.port_notice and request:
-                    request["_notice"] = self.port_notice  # said by the client whose request bound it (``_serve``)
-                elif self.port_notice:
-                    self.unsaid = self.port_notice  # bound for a build's page: that build's answer says it
-                # One pressure signal: under it the server trims its documents and the pool its workers.
+                self.server, where = bind(
+                    "127.0.0.1", self.port,
+                    lambda port, token: Server(port=port, three=request.get("three"), touch=self.touch,
+                                               provenance=self.provenance, cache=MESHES, isolated=True,
+                                               host="127.0.0.1", http_factory=HTTP_FACTORY,
+                                               budget=memory_budget(), token=token))
                 self.server.pressure = self.pressure
                 self.server.pressed = lambda: self.pool.shed(True)
                 self.server.lost = self.models.rebuild
@@ -1863,12 +1630,9 @@ class Daemon:
                 self.server.delete = self.models.delete
                 self.server.start()
                 started = True
-            elif ((request.get("port") and int(request["port"]) != self.server.port)
-                  or (request.get("host") and request["host"] != self.server.http.server_address[0])):
-                raise ValueError("the installation's engine already serves another host/port; stop it before changing its bind")
             server = self.server
         if started:
-            self.models.attach(server)  # the documents taken up from the cache before it ran: registered with it
+            self.models.attach(server)
         return server
 
     def document(self, ident: str) -> tuple[dict[str, Any], bytes]:
@@ -1889,7 +1653,7 @@ class Daemon:
             if worker is not None and self.pool.holds(worker):
                 # Asked of the worker that built it (``via``: a child model's is its parent's script's).
                 return {"script": record["source"]["script"], "function": record["source"]["name"], "held": ident,
-                        "via": worker.script}, b""
+                        "via": worker.script, "execution": worker.execution}, b""
             held = self.held_document(ident)
             if held is not None:
                 source, data = held
@@ -1953,6 +1717,10 @@ class Daemon:
                 worker = None
                 try:
                     environment = request.get("env") or {}
+                    execution = None if key == "documents" else (
+                        (request.get("source") or {}).get("execution") or request.get("execution"))
+                    # Native file/cache reads belong to the server. The caller's descriptor was
+                    # validated at admission; it must not select a project Python for these reads.
                     # An export runs in its caller's environment (``worker.adopt``), as a build does.
                     ordered = {**order, "env": environment} if environment and order.get("op") == "export" else order
                     if request.get("expected") or (request.get("source") or {}).get("held"):
@@ -1960,7 +1728,7 @@ class Daemon:
                         # worker, including its environment: another caller's environment must not
                         # evict it (a different one starts a fresh worker, which holds nothing).
                         with self.pool.lock:
-                            held = self.pool.live.get(os.path.normcase(key))
+                            held = self.pool.live.get(runtime.key(key, execution))
                             environment = held.environment if held else self.environment()
                         ordered = order
                         if held is None and "script" in request["source"]:
@@ -1968,7 +1736,7 @@ class Daemon:
                             send(refused(self.models.not_held(named)) if isinstance(named, str) else
                                  {"failed": "The viewed model is no longer held. Reopen it before exporting."})
                             return
-                    worker = self.lease(key, environment, cwd)
+                    worker = self.lease(key, environment, cwd, execution=execution)
                     expected = request.get("expected") or {}
                     if "modelRevision" in expected and "document" not in request["source"]:
                         # The lease excludes a rebuild: validate the generation here. A run that
@@ -1981,10 +1749,6 @@ class Daemon:
                             send({"failed": "The source changed. Open Export again to use the displayed revision."})
                             return
                     answer = worker.build(ordered, send, payload)
-                    held = (request.get("source") or {}).get("document")
-                    if held and answer.get("kind") == UNREADABLE:
-                        # The bytes a held document was read from (its cache file's) do not read.
-                        answer = refused(self.models.unreadable(str(held), str(answer.get("failed"))))
                     returned = answer.pop("payload", b"")
                     if returned:
                         import base64
@@ -2012,8 +1776,7 @@ class Daemon:
     def handle(self, request: dict[str, Any], send: Callable[[dict[str, Any]], None]) -> None:
         """One request, answered through ``send``. One that serves -- binding the HTTP server, a
         launch, a page's read -- counts in ``status``'s ``busy`` until it is answered, as builds and
-        draws do: another installation's engine starting meanwhile never retires this one under it
-        (``_holder``, ``retire_older``: both read ``busy`` through ``_uses``)."""
+        draws do."""
         if request.get("op") not in SERVING:
             return self._handle(request, send)
         with self.busy_lock:
@@ -2028,6 +1791,12 @@ class Daemon:
     def _handle(self, request: dict[str, Any], send: Callable[[dict[str, Any]], None]) -> None:
         self.touch()
         op = request.get("op")
+        if op == "shape" or (op == "result" and "execution" in request):
+            try:
+                runtime.validate(request.get("execution"))
+            except ValueError as error:
+                send(refused(error))
+                return
         if op == "reattach":
             # A worker's models with nothing to take up, before it reads their cache (``build._reattach``).
             sources = request.get("models")
@@ -2165,22 +1934,28 @@ class Daemon:
                 self.busy += 1
             try:
                 script = request["script"]
+                try:
+                    execution = runtime.validate(request.get("execution"))
+                except ValueError as error:
+                    send(refused(error))
+                    return
                 key, cwd = self._routed(request)
                 for attempt in (1, 2):
                     worker = None
-                    ahead = self.behind(key, send) if attempt == 1 else None
+                    ahead = self.behind(key, send, execution) if attempt == 1 else None
                     waited = time.monotonic()
                     try:
                         try:
                             worker = self.lease(key, request.get("env") or {}, cwd,
-                                                lambda text: send({"log": text, "stream": "notice"}))
+                                                lambda text: send({"log": text, "stream": "notice"}), execution)
                         finally:
                             if ahead is not None and send in ahead[0].followers:
                                 ahead[0].followers.remove(send)
                         fresh = worker.builds == 0
                         order = {"id": 1, "op": "build", "script": script, "functions": request.get("functions"),
                                  "cwd": request.get("cwd"), "verify": bool(request.get("verify")),
-                                 "profile": bool(request.get("profile")), "run": request.get("run")}
+                                 "profile": bool(request.get("profile")), "run": request.get("run"),
+                                 "execution": execution}
                         if request.get("env"):
                             order["env"] = request["env"]  # the run's own (``worker.adopt``)
                         cached = self.models.cache.folder()
@@ -2339,8 +2114,6 @@ class Daemon:
                 "active": server is not None and bool(server.clients_active()),
                 "serving": None if self.server is None else {"url": self.server.url, "port": self.server.port,
                                                              "portSource": self.port_source,
-                                                             "portBecause": self.port_because,
-                                                             "portNotice": self.port_notice,
                                                              "defaultPort": default_port(),
                                                              "documents": self.server.listing(every=True),
                                                              "memory": self.server.memory()},
@@ -2418,16 +2191,29 @@ def _serve(daemon: Daemon, reader: Any, writer: Any, prefix: bytes = b"") -> Non
     lock = threading.Lock()
 
     def send(message: dict[str, Any]) -> None:
-        if "log" not in message and set(message) != {"progress"}:
-            if "_notice" in request:
-                message = {**message, "notice": request.pop("_notice")}  # its answer carries it: said once
-            elif daemon.unsaid and request.get("op") == "build":
-                notice, daemon.unsaid = daemon.unsaid, ""
-                message = {**message, "notice": notice}
         with lock:
             writer.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
             writer.flush()
 
+    if request.get("op") != "hello":
+        send({"failed": "a cadgen client handshake is required"})
+        return
+    expected = {"protocol": PROTOCOL, "release": daemon.release_version, "port": daemon.port}
+    if any(request.get(key) != value for key, value in expected.items()):
+        send({"failed": f"cadgen client/server mismatch: server is cadgen {daemon.release_version} on port {daemon.port}; "
+                        "client and server must use exactly the same cadgen release, including patch", **expected})
+        return
+    expected["instance"] = daemon.instance
+    send({"ok": True, **expected})
+    line = reader.readline()
+    if not line:
+        return
+    request = json.loads(line)
+    if request.get("engineIdentity") != expected:
+        send({"failed": "the cadgen server instance changed or the request identity is invalid"})
+        return
+    if WINDOWS and request.get("token") != daemon.token:
+        return
     if request.get("op") == "hold":
         daemon.hold(reader, send, request.get("host"), request.get("holder"))
         return
@@ -2435,9 +2221,6 @@ def _serve(daemon: Daemon, reader: Any, writer: Any, prefix: bytes = b"") -> Non
         daemon.handle(request, send)
     except (OSError, ValueError) as error:
         send({"failed": str(error)})
-    finally:
-        if daemon.refusal is not None:
-            daemon.stopping.set()  # its answer sent: the engine whose port is another's stops
 
 
 def _serve_door(daemon: Daemon, ident: str) -> None:
@@ -2672,17 +2455,22 @@ def _identity(path: Path) -> tuple[int, int] | None:
 
 def main(argv: list[str] | None = None, *, port: int | None = None, rotate: bool = False,
          foreground: bool = False) -> int:
-    """Run the engine here. ``port``: the HTTP port it must take (``cadgen server --port``);
-    ``rotate``: a new page token first (``--rotate-token``), refused while another engine runs;
-    ``foreground`` (``cadgen server``): its HTTP server bound before anything else, so a port
-    another process holds fails the command at once (``bind``). An engine a client starts binds
-    on the first request that serves, which may name its own port (``cadgen viewer --port``)."""
+    """Run the explicitly selected server, binding HTTP before publishing its private door.
+
+    ``rotate`` replaces the page token only while every engine is stopped. A compatible
+    server already on this port is reused; a release mismatch or occupied port is refused.
+    """
     from cadgen.engine.serve import Pressure
 
     try:
+        if port is not None:
+            if not 1 <= port <= 65535:
+                raise ValueError("--port must be between 1 and 65535")
+            os.environ["CADGEN_PORT"] = str(port)
+        selected_port()
         Pressure.override(os.environ)
     except ValueError as error:  # refused at the start, in its one line, before anything is held
-        _note(str(error))
+        print(f"cadgen: {error}", file=sys.stderr)
         return 1
     bytecode(os.environ)  # its own (``client._start`` set it), or made here: a daemon run in the foreground
     sys.pycache_prefix = os.environ.get("PYTHONPYCACHEPREFIX") or None
@@ -2697,12 +2485,23 @@ def main(argv: list[str] | None = None, *, port: int | None = None, rotate: bool
             print("cadgen: an engine server is running; run cadgen stop first, then cadgen server --rotate-token",
                   file=sys.stderr)
             return 1
-        if foreground:  # ``cadgen server``: said, never a silent success that serves nothing it asked
-            print("cadgen: this installation's engine server is already running: `cadgen status` says where it "
-                  "serves, `cadgen stop` stops it" + (f" (to serve on {port})" if port is not None else ""),
-                  file=sys.stderr)
-            return 1 if port is not None else 0
-        return 0  # another daemon is up
+        from cadgen.engine import client
+
+        try:
+            connection = client.connect()
+            if connection is not None:
+                connection.close()
+                if foreground:
+                    print(f"cadgen: compatible server already running on port {selected_port()}", file=sys.stderr)
+                return 0
+        except (OSError, ValueError) as error:
+            _note(str(error))
+            return 1
+        if foreground:
+            print(f"cadgen: port {selected_port()}'s server holds its private lock but has not answered; "
+                  "it may be starting or stopping; try again once it is ready", file=sys.stderr)
+            return 1
+        return 0  # a concurrent startup holds the lock; its bootstrap client waits for the door
     if rotate:
         others = others_running()
         if others:
@@ -2742,21 +2541,16 @@ def main(argv: list[str] | None = None, *, port: int | None = None, rotate: bool
     except Exception as error:  # noqa: BLE001
         daemon.identity = {"filled": 0, "moved": 0, "skipped": [f"the pass failed: {type(error).__name__}: {error}"]}
         print(f"cadgen: identity migration failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
+    try:
+        daemon.serve({})
+    except ValueError as error:
+        _note(str(error))
+        daemon.shutdown()
+        if listener is not None:
+            listener.close()
+        let_go(held, failed=True)
+        return 1
     daemon.stand()
-    if foreground:
-        try:
-            daemon.serve({})
-        except ValueError as error:  # a port held (``PortHeld``, noted by ``serve``) or refused
-            if not isinstance(error, PortHeld):
-                _note(str(error))
-            daemon.shutdown()
-            if listener is not None:
-                listener.close()
-            let_go(held, failed=True)
-            return 1
-        for said in daemon.port_notice.splitlines():
-            print(f"cadgen: {said}", file=sys.stderr)  # ``cadgen server``'s terminal
-            daemon.unsaid = ""
     if not WINDOWS:
         import signal
 
@@ -2801,8 +2595,8 @@ def main(argv: list[str] | None = None, *, port: int | None = None, rotate: bool
             daemon.door.close()  # first: no hello is taken while the rest stops
         daemon.shutdown()
         # Its port file, its failure note but a failure's, and its lock: nothing of it stays behind.
-        let_go(held, failed=failed or daemon.refusal is not None)
-    return 1 if daemon.refusal is not None else 0
+        let_go(held, failed=failed)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

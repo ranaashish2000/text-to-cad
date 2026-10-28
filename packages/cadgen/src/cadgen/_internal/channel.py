@@ -23,7 +23,7 @@ a plugin's server once ran from its installation, whose channel it then shares.
 cadgen reads a channel as a token and nothing more: telemetry reports it, and nothing decides by
 its name but ``dev``, a development install (and a source tree, installed editable or imported from
 a checkout by path), which hears of no release and sends no telemetry by default. A process of an
-installation no plugin's server ever ran from -- a skills-only install, or cadgen run by hand -- is
+installation no plugin's server ever ran from -- a skills-only install, or cadgen invoked by hand -- is
 ``unknown``. Which app runs a server is not a channel either: the MCP handshake says that
 (``clientInfo``), so a plugin several apps read names one channel.
 

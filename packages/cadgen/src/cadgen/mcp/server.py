@@ -342,8 +342,7 @@ class Server:
             from cadgen.analytics import Recorder
             from cadgen.settings import FILE
 
-            # The settings beside the model library (the state directory, by default): shared by every process.
-            path = Path(self._recents.root).parent / FILE if self._recents is not None else None
+            path = self._recents.registry.state.root / FILE if self._recents is not None else None
             self._analytics = Recorder(path=path)
         return self._analytics
 
@@ -422,6 +421,23 @@ class Server:
 
     def _initialize(self, params: dict[str, Any]) -> dict[str, Any]:
         from cadgen import __version__
+        from cadgen.engine.daemon import selected_port
+
+        port = selected_port()
+        authoring = (
+            "Create or use a project virtual environment; `python` means that project's interpreter. "
+            f"Install this server's exact release there with `python -m pip install cadgen=={__version__}`. "
+            f"If it has no pip, use `uv pip install --python <project-python> cadgen=={__version__}`. "
+            "Keep the model's other dependencies in that environment too. "
+            f"This MCP server already starts or attaches to the engine on port {port}. "
+            f"Set `CADGEN_PORT={port}` in the project's process environment and run `python model.py`; "
+            "model calls attach to that engine. A minimal model script is:\n"
+            "```python\nimport build123d as bd\nfrom cadgen import model\n\n"
+            "@model\ndef part():\n    return bd.Box(10, 20, 5)\n\n"
+            "if __name__ == \"__main__\":\n    part()\n```\n"
+            "A model is a no-argument function returning a build123d shape. "
+            "Running the script prints its live document id; pass that id to `cad_show`. "
+        )
 
         client = params.get("clientInfo") if isinstance(params.get("clientInfo"), dict) else {}
         offered = params.get("capabilities") if isinstance(params.get("capabilities"), dict) else {}
@@ -444,7 +460,7 @@ class Server:
             "protocolVersion": requested if requested in _PROTOCOL_VERSIONS else _PROTOCOL_VERSIONS[1],
             "capabilities": capabilities,
             "serverInfo": {"name": NAME, "title": TITLE, "version": __version__, "icons": [ICON]},
-            "instructions": INSTRUCTIONS if self.tabs else TEXT_INSTRUCTIONS if self.text else INLINE_INSTRUCTIONS,
+            "instructions": authoring + (INSTRUCTIONS if self.tabs else TEXT_INSTRUCTIONS if self.text else INLINE_INSTRUCTIONS),
         }
 
     # -- the catalog -----------------------------------------------------------

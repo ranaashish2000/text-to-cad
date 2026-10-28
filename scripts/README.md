@@ -121,11 +121,12 @@ where those files ship, so these scripts are what produces them.
   the sha256 PyPI lists, go to `--released`; a file PyPI holds that the run did
   not build fails it. Called by `release-publish.yml`'s `pypi` job.
 - `check-version.sh [--incremented-from REF]` — `VERSION` is valid semver, every
-  skill pins `cadgen==VERSION` and runs `cadgen +VERSION`, and (with the flag)
+  skill's main file and setup guide pin `cadgen==VERSION` or run `cadgen +VERSION`, and (with the flag)
   `VERSION` is greater than the one at `REF`. Called by `test.yml` (Version Check), `release-publish.yml`,
   `publish-github-release.sh`.
 - `sync-version.mjs [--check]` — stamps the derived versions (package, plugin,
-  lockfile and `pyproject.toml` metadata, the cadgen pins and the skills' `cadgen +VERSION`) from
+  lockfile and `pyproject.toml` metadata, and runtime pins in each skill's main file and
+  `references/setup.md`) from
   `VERSION`. Called by `bump-version.sh`, `bundle.sh`, `test.yml` (Version Check), `release-publish.yml`.
 - `check-wheel-contents.sh` — builds the wheel and asserts the Python modules,
   the engine's page, environment image and README, and `_runtime/{viewer,mcp}` with each
@@ -191,7 +192,7 @@ where those files ship, so these scripts are what produces them.
   for `claude` (which Cursor and Grok Build load too), `codex`, `cursor`, `grok`
   and `gemini` (skills copied, server run by `.venv`, serving a copy of the page
   taken at install, assembled under `tmp/<host>-dev`), with the skills' launch
-  command rewritten to that same runtime; `--wheel` builds the checkout's wheel and
+  command and linked setup guide rewritten to that same runtime; `--wheel` builds the checkout's wheel and
   runs both through `uvx --from <wheel>`; the server alone for `claude-desktop`. Refuses a host where another copy of the plugin, or this
   repository's skills installed loose, would load. Developer step in
   `CONTRIBUTING.md` ("Test In Agent Apps"); its assembly and loose-skill check are

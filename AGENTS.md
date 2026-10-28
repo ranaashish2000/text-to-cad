@@ -50,18 +50,17 @@ pipeline; the standalone `Deploy Docs` workflow redeploys the docs site from a
 ref without a release. The full flow, the resume path, the rehearsal and the
 local fallbacks are [CONTRIBUTING.md's Releases](CONTRIBUTING.md#releases).
 
-cadgen installs as ONE uvx command, `uvx --no-config --managed-python --python
-3.13 --from cadgen==<VERSION> <tool>` (`cadgen._internal.launch`), which the
-plugin server configs run. That installation registers itself and writes the
-`cadgen` command, `~/.local/bin/cadgen`; every cadgen skill's SKILL.md runs
-`cadgen +<VERSION>` through it (uvx cannot start in an agent's sandbox, the
-command can). The release stamps every pin and `+<VERSION>` (`sync-version.mjs`),
-and `scripts/release/check-version.sh` and the tests assert they all equal
-`VERSION`. One installation is one engine: the server, every thread and every
-skill command share one daemon ([CONTRIBUTING.md, "Development
-dependencies"](CONTRIBUTING.md#development-dependencies)). In a checkout, install
-`requirements-dev.txt` (the editable cadgen) and test in agent apps with
-`scripts/install/dev_install.py`, which points both at the checkout.
+The server and MCP bootstrap use
+`uvx --no-config --managed-python --python 3.13 --from cadgen==<VERSION> <tool>`.
+The registered `cadgen +<VERSION>` command selects CLI verbs; model scripts run
+with the project's actual Python and a matching `cadgen==<VERSION>` installed in
+that environment. `cadgen server` starts an engine explicitly; MCP starts or
+attaches to the engine at the selected port. Clients select 3245 or `CADGEN_PORT`
+and only attach. Client, server and project worker releases must match exactly;
+there is no automatic startup, local fallback, port rollover or retirement of
+another engine. The release stamps the pins and `+<VERSION>` from `VERSION`.
+In a checkout, install `requirements-dev.txt` and test in agent apps with
+`scripts/install/dev_install.py`.
 
 ## Repo Map
 
@@ -134,16 +133,15 @@ dependencies"](CONTRIBUTING.md#development-dependencies)). In a checkout, instal
   repository-root module, and must not add `skills/`, the repository root, or a
   sibling skill directory to `sys.path`, `PYTHONPATH`, `NODE_PATH`, or any other
   runtime lookup path. Skills are independent of each other, not of everything.
-- Shared runtime comes from the **`cadgen` distribution**. A skill that uses it
-  defines `cadgen` and `python` in its SKILL.md as `cadgen +<VERSION>` above
-  (the release stamps every pin); no skill installs cadgen
-  any other way (no `requirements.txt` naming it), because a second installation
-  is a second daemon. Skills do not vendor it: a skill script is a thin entrypoint whose
-  parser and behaviour live in `cadgen.cli`. The engine draws every snapshot with
-  OCCT, so no skill has a browser step. cadgen carries the JavaScript it serves too
-  (the CAD Viewer client, the CAD app page), so a skill ships no runtime of its own. Not every
-  skill needs cadgen (bambu-labs, dfam-check, dfm, gcode, sendcutsend,
-  step-parts are cadgen-free); do not add the dependency to a skill that never invokes it.
+- Shared runtime comes from the **`cadgen` distribution**. A cadgen skill
+  defines its CLI as `cadgen +<VERSION>` and its `python` as the project's actual
+  interpreter, with that exact cadgen release installed. Project dependencies
+  belong in that environment; its warm workers are started by the selected
+  engine. Skills do not vendor cadgen: a script is a thin entrypoint whose parser
+  and behaviour live in `cadgen.cli`. Snapshots use OCCT, with no browser step.
+  cadgen carries the Viewer and CAD app JavaScript too. Skills that never invoke
+  cadgen (bambu-labs, dfam-check, dfm, gcode, sendcutsend, step-parts) need no
+  cadgen dependency.
 - Keep samples and manual CAD/robot-description validation artifacts under
   `models/`. Automated tests must not read, build or import that sample corpus:
   generate small fixtures in fresh temporary directories or use tiny test-owned

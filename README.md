@@ -32,10 +32,10 @@ Gemini and Grok.
 ### How it works
 
 1. Your agent writes each model as a Python script with [build123d](https://github.com/gumyr/build123d), built on [Open CASCADE](https://dev.opencascade.org).
-2. Running the script, `python model.py`, builds the model with cadgen's engine
-   into an `.xbf` document (its parts, names, colours, materials and joints) and
-   the STEP, GLB, STL or 3MF files the script declares. The engine keeps each
-   model's work in memory, so an edit rebuilds only what it changed.
+2. With cadgen's engine running, `python model.py` uses the project's Python
+   environment to build an `.xbf` document (its parts, names, colours, materials
+   and joints) and the STEP, GLB, STL or 3MF files the script declares. The engine
+   keeps each model's work in memory, so an edit rebuilds only what it changed.
 3. The CAD viewer shows the model in your agent app or your browser, and follows
    every rebuild.
 
@@ -51,7 +51,7 @@ Install text-to-cad from https://github.com/earthtojake/text-to-cad
 
 By default, text-to-cad sends usage stats and crash reports, tagged with a random
 ID and never including your files, paths or prompts; turn them off with
-`uvx --no-config --managed-python --python 3.13 --from cadgen==0.8.1 cadgen telemetry off`, or ask your agent to. [Telemetry](#telemetry) says
+`uvx --no-config --managed-python --python 3.13 --from cadgen==0.8.2 cadgen telemetry off`, or ask your agent to. [Telemetry](#telemetry) says
 the rest.
 
 The runtime supports Python 3.11+; the launch commands use uv-managed Python 3.13.
@@ -78,10 +78,16 @@ branch in its own way (`#latest`, `--ref latest`, `@latest` or
 
 Each app's heading also says how to update text-to-cad, and how to reinstall it:
 remove it, then install it again. Updating the plugin updates CAD: the new
-release's cadgen is downloaded the first time it runs, and the skills and the
-server share it. Earlier releases stay in uv's cache until you run `uv cache prune`.
+release's server is downloaded the first time it runs. The agent installs that
+same cadgen release in each project's Python environment alongside its other
+dependencies. Scripts run with project Python and attach to the running engine;
+the plugin's MCP bootstrap starts it. Earlier releases stay in uv's cache until
+you run `uv cache prune`.
 
 ### Claude Code
+
+Claude Desktop's Code tab uses this plugin. Its regular Chat tab needs separate
+local MCP setup; Cowork uses the plugin's bundled MCP server.
 
 ```bash
 claude plugin marketplace add earthtojake/text-to-cad#latest
@@ -107,7 +113,10 @@ claude plugin uninstall text-to-cad@earthtojake
 claude plugin marketplace remove earthtojake
 ```
 
-### Claude Desktop
+### Claude Desktop: Chat tab
+
+Use this setup for CAD in Claude Desktop's **Chat** tab. Claude Code and Cowork
+use the plugin's bundled MCP server and do not need this separate configuration.
 
 CAD shows models in the chat: ask Claude to show one and it appears as a viewer
 card you can orbit, add to your prompt, and open full size; Claude can read what
@@ -120,7 +129,7 @@ app. If Claude Desktop cannot find `uvx`, give its full path (`which uvx`).
   "mcpServers": {
     "cad": {
       "command": "uvx",
-      "args": ["--no-config", "--managed-python", "--python", "3.13", "--from", "cadgen==0.8.1", "cadgen", "mcp"],
+      "args": ["--no-config", "--managed-python", "--python", "3.13", "--from", "cadgen==0.8.2", "cadgen", "mcp"],
       "env": {"CADGEN_INSTALL_CHANNEL": "claude-desktop"}
     }
   }
@@ -254,9 +263,10 @@ The command asks which agents to install for, and where. To skip the questions,
 name the agent and install for your user:
 `npx skills add earthtojake/text-to-cad#latest -g -a <agent> -y`.
 
-Each skill runs cadgen through uv with the same pinned command the plugin's server
-uses, so uv must be installed. Without the plugin there is no CAD server, so the
-skills open models in the CAD Viewer in your browser.
+Follow the skill's setup instructions to install cadgen and start `cadgen server`.
+Run model scripts with the project's Python environment, with the matching cadgen
+release and any other project dependencies installed. The skills open models in
+the CAD Viewer in your browser.
 
 **To update or reinstall, run the same command again**, then restart the app.
 `add` re-fetches the package and overwrites what is already installed, so it both
@@ -313,7 +323,7 @@ code fails, they also send a crash report: the error's type and where in cadgen 
 dependencies) it failed, never its message, and with any of your own code a bare placeholder. Our server adds the country each request
 comes from (worked out from its IP address, which it doesn't keep) and stores it all with PostHog. Never file names,
 paths, contents or prompts. The first `cadgen` command says so once, and sending starts then. Turn it off, which
-also deletes what was sent, with `uvx --no-config --managed-python --python 3.13 --from cadgen==0.8.1 cadgen telemetry off`, **Telemetry** in either app's menu (the logo at
+also deletes what was sent, with `uvx --no-config --managed-python --python 3.13 --from cadgen==0.8.2 cadgen telemetry off`, **Telemetry** in either app's menu (the logo at
 the top left, over any model), or by asking your agent. `DO_NOT_TRACK=1` or `CADGEN_TELEMETRY=0` turns it off for
 one process, and `CADGEN_TELEMETRY=1` on, without changing your setting; nothing is sent by default in CI or from a
 development install. Nothing waits to send: a command or a model script sends nothing itself, and what it counted,

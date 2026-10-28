@@ -5,8 +5,9 @@ Each host gets the development plugin, text-to-cad@earthtojake-dev: this checkou
 CAD's server run by this checkout's .venv (`cadgen mcp`), serving a copy of this checkout's
 apps/mcp build. That .venv is registered as this install's version (<version>-dev.<time>), the
 skills run `cadgen +<version>-dev.<time>` and the `cadgen` command is written (~/.local/bin/cadgen), so
-the server and the agent's scripts share this checkout's installation and warm daemon -- and every
-worktree has its own. With --wheel, the checkout's wheel is built as the release builds it, the
+CLI verbs use this checkout's installation. Model scripts use the project's Python, with this
+checkout installed editable there, and attach to the same selected CADGEN_PORT. Choose distinct
+ports explicitly for worktrees that need independent engines. With --wheel, the checkout's wheel is built as the release builds it, the
 server runs it through uvx and that installation is the one registered: the shape users get. Claude Desktop's chat takes servers, not plugins, so it
 gets that server alone. Run it again after a change; --uninstall takes the install out. For an agent without plugins,
 install the skills alone from the checkout with the Skills CLI: `npx skills add . -g -a <agent>`.
@@ -32,6 +33,7 @@ keeps the code it started with.
 
 Environment:
     CADGEN_PYTHON           the interpreter that runs the server (default: the checkout's .venv)
+    CADGEN_PORT             the selected engine port, copied into the server config and skill setup
     CODEX_CLI               the codex CLI (default: the newer of `codex` on PATH and the Codex app's)
     GEMINI_CLI              the gemini CLI (default: `gemini` on PATH)
     CLAUDE_DESKTOP_CONFIG   Claude Desktop's config file (default: its own, per platform)
@@ -44,6 +46,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -86,11 +89,26 @@ def dev_root(host: str, root: Path = REPO_ROOT) -> Path:
 CHANNEL = {"CADGEN_INSTALL_CHANNEL": "dev"}
 
 
+def server_environment() -> dict:
+    """The plugin's declared channel and an explicitly selected engine port."""
+    environment = dict(CHANNEL)
+    port = os.environ.get("CADGEN_PORT", "").strip()
+    if port:
+        try:
+            number = int(port)
+        except ValueError:
+            raise Refused("CADGEN_PORT must be an integer from 1 to 65535") from None
+        if not 1 <= number <= 65535:
+            raise Refused("CADGEN_PORT must be an integer from 1 to 65535")
+        environment["CADGEN_PORT"] = str(number)
+    return environment
+
+
 def server_entry(host: str, python: str, page_dir: Path, version: str | None = None) -> dict:
     """CAD's server for a development install: this checkout's interpreter, this install's page, and
     the version it registers as at each start, `version` (cadgen's _internal/installations.py; a
     source tree registers none unless named)."""
-    entry = {"command": python, "args": ["-m", "cadgen.cli", "mcp"], "env": {**CHANNEL, "CADGEN_MCP_APP_DIR": str(page_dir)}}
+    entry = {"command": python, "args": ["-m", "cadgen.cli", "mcp"], "env": {**server_environment(), "CADGEN_MCP_APP_DIR": str(page_dir)}}
     if version:
         entry["env"][VERSION_ENV] = version
     if host == "codex":
@@ -159,15 +177,22 @@ def unregister(host: str) -> None:
 
 
 def skill_rewrites(released: str, version: str, python: str | None = None, wheel: Path | None = None) -> dict:
-    """What a development install changes in its skills' text, ``{release's: this install's}``: the
-    version they run (``cadgen +<version>``) is this install's, the `cadgen` command's folder is
-    CADGEN_LAUNCHER_DIR's, and the install command becomes the checkout's interpreter (the .venv
-    shape) or the wheel through uvx (--wheel), told that version so its `cadgen doctor` registers it
-    (Windows shells take no such prefix)."""
+    """CLI verbs use this registered development installation; project Python stays local.
+
+    A project installs the checkout editable, or the exact wheel under test. The
+    bootstrap uses this install's server and preserves an explicitly selected port.
+    """
     named = "" if os.name == "nt" else f"{VERSION_ENV}={version} "
-    command = " ".join((*LAUNCHER, str(wheel), "cadgen")) if wheel is not None else f"{python} -m cadgen.cli"
-    rewrites = {launch("cadgen", released): f"{named}{command}", f"cadgen +{released}": f"cadgen +{version}",
-                f"it says {released} is not installed": f"it says {version} is not installed"}
+    quote = (lambda value: subprocess.list2cmdline([str(value)])) if os.name == "nt" else (lambda value: shlex.quote(str(value)))
+    command = " ".join((*LAUNCHER, quote(wheel), "cadgen")) if wheel is not None else f"{quote(python)} -m cadgen.cli"
+    dependency = quote(wheel) if wheel is not None else f"-e {quote(REPO_ROOT / 'packages' / 'cadgen')}"
+    proxy = Path(launcher_dir()).expanduser() / ("cadgen.cmd" if os.name == "nt" else "cadgen")
+    rewrites = {launch("cadgen", released): f"{named}{command}",
+                f"~/.local/bin/cadgen +{released}": f"{quote(proxy)} +{version}",
+                f"cadgen.cmd +{released}": f"cadgen.cmd +{version}",
+                f"python -m pip install cadgen=={released}": f"python -m pip install {dependency}",
+                f"uv pip install --python <project-python> cadgen=={released}":
+                    f"uv pip install --python <project-python> {dependency}"}
     if launcher_dir() != "~/.local/bin":
         rewrites["~/.local/bin"] = launcher_dir()
     return rewrites
@@ -185,11 +210,23 @@ def assemble(host: str, plugin_dir: Path, version: str, server: dict, root: Path
     if plugin_dir.exists():
         shutil.rmtree(plugin_dir)
     shutil.copytree(root / "skills", plugin_dir / "skills", ignore=IGNORED)
+    # Only current runtime instructions: a migration reference may intentionally name an old release.
     for skill in plugin_dir.glob("skills/*/SKILL.md"):
-        text = skill.read_text(encoding="utf-8")
-        for released, ours in (rewrites or {}).items():
-            text = text.replace(released, ours)
-        skill.write_text(text, encoding="utf-8")
+        for document in (skill, skill.parent / "references" / "setup.md"):
+            if not document.is_file():
+                continue
+            text = document.read_text(encoding="utf-8")
+            uses_runtime = "cadgen +" in text or "cadgen.cmd +" in text or "--from cadgen==" in text
+            for released, ours in (rewrites or {}).items():
+                text = text.replace(released, ours)
+            port = server.get("env", {}).get("CADGEN_PORT") if rewrites and uses_runtime else None
+            if port:
+                notice = (f"This development install selects port {port}. Set `CADGEN_PORT={port}` in the project "
+                          "client environment too; use the same port for any explicit server bootstrap.\n\n")
+                # Keep SKILL.md's YAML frontmatter first; no prose pattern is coupled to this override.
+                position = text.find("\n---\n", 4) + 5 if text.startswith("---\n") else 0
+                text = text[:position] + "\n" + notice + text[position:].lstrip("\n")
+            document.write_text(text, encoding="utf-8")
     if host == "gemini":
         manifest = json.loads((root / "gemini-extension.json").read_text(encoding="utf-8"))
         manifest["version"] = version
@@ -329,8 +366,8 @@ def copy_page(host: str, build: bool, version: str, prune: bool = True) -> Path:
 def build_wheel(host: str, bundle: bool) -> Path:
     """This checkout's wheel, built as the release builds it, at a path of its own per build.
 
-    uv keeps one installation per requirement, so a wheel at a new path is a new installation --
-    and a warm daemon of its own -- never the previous build's, nor another worktree's.
+    uv keeps one installation per requirement, so each build's path selects that exact wheel.
+    The engine remains selected by CADGEN_PORT; a new build never displaces a running engine.
     """
     uv = cli("uv", "; install uv: https://docs.astral.sh/uv/")
     if bundle:
@@ -359,7 +396,7 @@ def runtime(host: str, args: argparse.Namespace, version: str) -> tuple[dict, di
     released = (REPO_ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if args.wheel:
         wheel = build_wheel(host, args.build)
-        server = {"command": LAUNCHER[0], "args": [*LAUNCHER[1:], str(wheel), "cadgen", "mcp"], "env": dict(CHANNEL)}
+        server = {"command": LAUNCHER[0], "args": [*LAUNCHER[1:], str(wheel), "cadgen", "mcp"], "env": server_environment()}
         if host == "codex":
             server["startup_timeout_sec"] = CODEX_STARTUP_SECONDS
         if host not in PLUGIN_HOSTS:  # Claude Desktop's chat runs no skills

@@ -14,7 +14,7 @@ export default {
   // The page before the viewer answers (`apps/web`'s starting view).
   "app.start.notAnswering": "The CAD Viewer is not answering",
   "app.engine.notRunning": "The engine is not running; the page reconnects when it is back.",
-  "app.engine.startIt": "Run cadgen run <script>.py or cadgen viewer to start it.",
+  "app.engine.startIt": "Run cadgen server to start it.",
   "app.engine.linkReplaced": "This page's link was replaced; the page reconnects once its new link is opened.",
   "app.engine.openNewLink": "Run cadgen viewer and open the link it prints.",
 

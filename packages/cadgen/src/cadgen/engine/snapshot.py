@@ -1110,7 +1110,11 @@ def add_parser(verbs: Any) -> argparse.ArgumentParser:
 
 def build_parser(prog: str = "cadgen snapshot") -> argparse.ArgumentParser:
     """``cadgen snapshot``'s parser."""
-    return _arguments(argparse.ArgumentParser(prog=prog, description=_HELP))
+    from cadgen.engine.cli import _port_argument
+
+    parser = _arguments(argparse.ArgumentParser(prog=prog, description=_HELP))
+    _port_argument(parser)
+    return parser
 
 
 def main(argv: list[str] | None = None, prog: str = "cadgen snapshot", suffixes: tuple[str, ...] = ()) -> int:

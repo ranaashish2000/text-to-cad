@@ -46,7 +46,6 @@ def _export_arguments(export: argparse.ArgumentParser) -> None:
 
 def _serve_arguments(serve: argparse.ArgumentParser) -> None:
     serve.add_argument("document", help="an .xbf, a STEP, or a document id")
-    serve.add_argument("--port", type=int, default=0)
     serve.add_argument("--three", help="the three.js package folder (default: the nearest node_modules/three)")
 
 
@@ -67,10 +66,6 @@ def _delete_arguments(delete: argparse.ArgumentParser) -> None:
 
 
 def _server_arguments(server: argparse.ArgumentParser) -> None:
-    server.add_argument("--port", type=int, default=None,
-                        help="the HTTP port the engine takes, refused when another process holds it (else "
-                             "CADGEN_ENGINE_PORT, else 3245 or the port this installation rolled to); 0 takes "
-                             "any free port")
     server.add_argument("--rotate-token", action="store_true",
                         help="replace this installation's page token first: every link shared before stops working")
 
@@ -114,7 +109,9 @@ def build_parser(prog: str = "python -m cadgen.engine") -> argparse.ArgumentPars
     parser = argparse.ArgumentParser(prog=prog, description="Export, draw and serve cadgen engine documents.")
     verbs = parser.add_subparsers(dest="verb", required=True)
     for verb, (help_text, arguments, _runner) in VERBS.items():
-        arguments(verbs.add_parser(verb, help=help_text, description=help_text))
+        child = verbs.add_parser(verb, help=help_text, description=help_text)
+        _port_argument(child)
+        arguments(child)
     return parser
 
 
@@ -122,8 +119,14 @@ def parser_for(verb: str, prog: str | None = None) -> argparse.ArgumentParser:
     """One verb's parser, as a command of its own (``cadgen export``, ``cadgen snapshot``, ...)."""
     help_text, arguments, _runner = VERBS[verb]
     parser = argparse.ArgumentParser(prog=prog or f"cadgen {verb}", description=help_text)
+    _port_argument(parser)
     arguments(parser)
     return parser
+
+
+def _port_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--port", type=int, default=None,
+                        help="select the engine port (else CADGEN_PORT, else 3245)")
 
 
 def run(verb: str, argv: list[str] | None = None, prog: str | None = None) -> int:
@@ -155,6 +158,17 @@ def answered(runner: Callable[[argparse.Namespace, str], int], args: argparse.Na
     # first build cold, every document read again) from the one they had.
     client.on_started = lambda: print("engine started", file=sys.stderr, flush=True)
     try:
+        port = getattr(args, "port", None)
+        if port is not None:
+            if not 1 <= port <= 65535:
+                raise Failed("--port must be between 1 and 65535", 2)
+            os.environ["CADGEN_PORT"] = str(port)
+        from cadgen.engine.daemon import selected_port
+
+        try:
+            selected_port()
+        except ValueError as error:
+            raise Failed(str(error), 2) from None
         return runner(args, prog)
     except (Failed, ConnectionError) as failure:
         # ``ConnectionError``: the engine not reached (none runs and none can start: a sandbox, a
@@ -415,7 +429,7 @@ def _serve(args: argparse.Namespace, prog: str) -> int:
     from cadgen.engine import api
 
     try:
-        print(api.serve(args.document, args.port, args.three).url)
+        print(api.serve(args.document, three=args.three).url)
     except ValueError as error:
         raise Failed(str(error), 2) from None
     except api.EngineError as error:
@@ -627,8 +641,8 @@ def plain(text: str) -> str:
 def _server(args: argparse.Namespace, prog: str) -> int:
     from cadgen.engine.daemon import main as daemon
 
-    if args.port is not None and not 0 <= args.port <= 65535:
-        raise Failed("--port must be between 0 and 65535", 2)
+    if args.port is not None and not 1 <= args.port <= 65535:
+        raise Failed("--port must be between 1 and 65535", 2)
     return daemon([], port=args.port, rotate=args.rotate_token, foreground=True)
 
 
@@ -649,23 +663,15 @@ def _status(args: argparse.Namespace, _prog: str) -> int:
 
 
 def _told_swept(swept: dict[str, list[str]]) -> None:
-    """What a sweep found besides this protocol's server, on stderr (stdout is the answer's): the
-    stale files it removed, and a server of an older protocol, which ``stop`` stops."""
+    """The selected server's stale files removed, on stderr; stdout holds the answer."""
     for path in swept["removed"]:
         print(f"removed stale engine file {path}", file=sys.stderr)
-    from cadgen.engine.daemon import address
-
-    current = str(address())
-    for address in swept["running"]:
-        if address != current:
-            print(f"an engine server of an older cadgen runs at {address}; cadgen stop stops it", file=sys.stderr)
 
 
 def _stop(args: argparse.Namespace, prog: str) -> int:
     from cadgen.engine.client import sweep
 
-    # Every server of this installation, whatever protocol it speaks; stopped means gone: the next
-    # command starts a fresh one, never reaches these.
+    # Stop only the selected server and wait for its workers to exit.
     try:
         swept = sweep(stop=True)
     except ConnectionError as error:
@@ -729,18 +735,14 @@ def _gb(megabytes: Any) -> str:
 
 
 def _port(serving: dict[str, Any]) -> str:
-    """Where the served port came from, in words -- the default, ``--port``, ``CADGEN_ENGINE_PORT``
-    or a roll from a held default -- as the serving line's parenthesis; nothing for an answer that
-    does not say."""
+    """How this server's explicit port was selected."""
     port, default = serving.get("port"), serving.get("defaultPort")
     if port is None or default is None:
         return ""
     if port == default:
         return " (the default port)"
     source = serving.get("portSource") or ""
-    if source == "rolled":
-        return f" (rolled from {default} because {serving.get('portBecause') or 'another process'} holds it)"
-    return " (" + {"--port": "the port --port named", "CADGEN_ENGINE_PORT": "the port CADGEN_ENGINE_PORT names"
+    return " (" + {"--port": "the port --port named", "CADGEN_PORT": "the port CADGEN_PORT names"
                    }.get(source, f"not the default {default}") + ")"
 
 
@@ -821,8 +823,6 @@ def status_text(answer: dict[str, Any]) -> str:
         lines.append(f"serving {serving['url']}{_port(serving)}: {opened} document{'' if opened == 1 else 's'} opened by a page or a command"
                      + (f" · {renders} render process{'' if renders == 1 else 'es'}" if renders else "")
                      + (f" · {_gb(held / 2**20)} of {_gb(memory['budget'] / 2**20)} held" if memory.get("budget") else ""))
-        # What this engine's start said: the older engines it retired, a move of its port.
-        lines.extend(f"  {said}" for said in (serving.get("portNotice") or "").splitlines())
     cache = answer.get("cache") or {}
     if cache.get("enabled"):
         failures = cache.get("failures") or []

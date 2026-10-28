@@ -188,7 +188,7 @@ def launcher() -> dict[str, Any] | None:
 
 
 def family(found: Any) -> str | None:
-    """The host a launcher (``launcher``) names, as its shells name it (``engine_host.shell``):
+    """The family of the host a launcher (``launcher``) names:
     ``codex`` for each of Codex's programs, ``claude code``, else the host's own name; None where none
     is known."""
     name = str(found.get("host") or "") if isinstance(found, dict) else ""

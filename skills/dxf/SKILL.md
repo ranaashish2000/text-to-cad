@@ -12,27 +12,19 @@ repository link is only for provenance and release review.
 
 ## Setup
 
-Run cadgen through the `cadgen` command its installation writes, so this skill's commands
-share one installation, and its engine server, with the CAD app's:
+- `cadgen` below means `~/.local/bin/cadgen +0.8.2`, the registered CLI.
+- `python` below means the project's Python interpreter, with the matching cadgen
+  release and the project's other dependencies installed. Run models with `python model.py`.
+- MCP starts or attaches to the engine; without MCP, run `cadgen server` and keep it running.
+  Use the port advertised by MCP, or 3245 by default; set `CADGEN_PORT` in the project
+  environment for another port. Server and project releases and ports must match;
+  clients never start an engine or fall back locally.
 
-- `cadgen` below means `cadgen +0.8.1` (`~/.local/bin/cadgen +0.8.1` where `~/.local/bin` is not on your PATH)
-- `python` below means `cadgen +0.8.1 run`
+For first-time setup, Windows or a relocated CLI, or an installation/connection error,
+read [Setup and troubleshooting](references/setup.md).
 
-If `cadgen` is not on your PATH, or it says 0.8.1 is not installed, run
-`uvx --no-config --managed-python --python 3.13 --from cadgen==0.8.1 cadgen doctor` once,
-outside any sandbox or with its permission: it installs cadgen, registers it, writes the
-`cadgen` command and starts the engine. With the CAD app's server running, nothing else
-needs the sandbox's permission: it starts the engine and holds it. Without it, a sandboxed
-shell cannot start the engine; when a command says no engine is running, run `cadgen server`
-outside the sandbox once.
-
-`cadgen doctor <skill-dir>` reports the installation in use and checks that it is
-the one this skill pins, that the CAD kernel loads, and whether the engine every
-build runs in is running, starting it when none is; use it for installation or kernel load errors.
-
-Drawings are build123d geometry, so a drawing builds in the engine's warm worker
-like any model: the first run of a script loads the CAD kernel (a few seconds),
-and later runs reuse it.
+Drawings build in the engine's warm project worker: the first run loads the CAD
+kernel, and later runs reuse it.
 
 ## Purpose
 
@@ -305,7 +297,7 @@ own work; review with `cadgen snapshot`.
   cadgen viewer --json FILE [FILE ...]
   ```
 
-  The command ensures this installation's engine, registers each file and prints
+  The command attaches to the selected engine, registers each file and prints
   its page, `/<id>`, then exits. Read each file's `url` from `documents` in its one
   JSON line (never guess the port); the URL carries its token query. A page follows
   every later run of its model and every rewrite of its file, so share it once.

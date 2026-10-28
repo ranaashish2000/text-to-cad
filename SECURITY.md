@@ -6,7 +6,7 @@ text-to-cad is a local development tool: agent skills and `cadgen`, the
 distribution that builds, views and exports CAD models on your own machine.
 Everything below runs as you, with your files.
 
-**The engine.** One warm `cadgen` daemon per installation does the building,
+**The engine.** An explicitly started `cadgen` daemon at the selected port does the building,
 viewing and exporting. Its clients reach it through its door, a named pipe
 with a pair of pipes per connection, that only you can open (on Windows, a
 loopback port and a token in a file only you can read). The door lives in the
@@ -17,17 +17,22 @@ else `/tmp/cadgen-<uid>`). The client and the daemon refuse a folder that
 another user owns or that others can write to. A shell inside an agent's
 sandbox that can open the door builds with the engine's own rights, outside
 the sandbox, by design (the door is how a sandboxed agent reaches the
-engine), so the boundary is your user account, not the sandbox.
+engine), so the boundary is your user account, not the sandbox. Model workers use
+the calling project's Python environment. Client, engine and worker must report
+the same cadgen release before building; release checks add no trust boundary.
 
 **The CAD Viewer and the MCP endpoint.** The engine serves the CAD Viewer and
 the CAD app's MCP endpoint over HTTP on `127.0.0.1` (port 3245 unless you name
-another; when another program holds it, the next free port, which your
-installation keeps and names in `cadgen status`). Every route needs one of three
+another through `CADGEN_PORT` or `--port`). The port selects the engine's private
+door too; project interpreters can share it. Document records, cached bytes and
+Recents are isolated per port; preferences, installation records and the page token
+remain shared. This separates document state, not user-account authority. Bootstrap reuses a compatible selected engine; a conflicting listener fails rather than
+moving to another port or stopping its owner. Ordinary clients only attach. Every route needs one of three
 credentials, all made from one token:
 
 - **The token** is yours, not one engine's: made once, kept in a file only you
   can read in your state folder (`engines/token`), and served by every
-  installation's engine at every start until you rotate it. No URL carries it,
+  engine at every start until you rotate it. No URL carries it,
   and only `cadgen viewer --api-only --json` prints it, for the development
   client's proxy. Your own clients read it through the engine's door and send
   it as a Bearer header.
@@ -45,7 +50,7 @@ credentials, all made from one token:
 An engine checks a link or a cookie by signing it again, so it keeps no
 sessions: links and cookies outlive a restart, a reboot, a port that moved and
 an upgrade. `cadgen server --rotate-token`, with every engine stopped
-(`cadgen stop`, with each version that runs one), replaces the token, and with
+(`cadgen stop`, for each port that runs one), replaces the token, and with
 it every link and every session made before. Behind the credentials:
 
 - A Host check refuses DNS rebinding.

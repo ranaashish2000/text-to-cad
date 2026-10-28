@@ -317,9 +317,9 @@ class StandbyTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CADGEN_ENGINE_PRESSURE": "yes", "CADGEN_ENGINE_DIR": str(folder)}):
             with self.assertRaisesRegex(ValueError, "CADGEN_ENGINE_PRESSURE is 'yes': 0 .*, 1 .*, or unset"):
                 Daemon(cap=1)
-            with mock.patch("sys.stderr"):
+            with mock.patch("sys.stderr") as said:
                 self.assertEqual(engine.main([]), 1, "refused at the start")
-            self.assertIn("CADGEN_ENGINE_PRESSURE is 'yes'", json.loads(engine.failure_path().read_text(encoding="utf-8"))["reason"])
+            self.assertIn("CADGEN_ENGINE_PRESSURE is 'yes'", "".join(call.args[0] for call in said.write.call_args_list))
 
     def test_status_shows_the_standby_with_its_memory_and_never_as_a_script_s_worker(self) -> None:
         from cadgen.engine.cli import status_text
@@ -495,7 +495,7 @@ class DaemonPoolTest(unittest.TestCase):
         # Its engine, its registry of documents and its cache are its own, never the developer's.
         own = Path(tempfile.mkdtemp(prefix="engine-own-"))  # beside the project: nothing lands in it
         self.addCleanup(shutil.rmtree, own, True)
-        private = {"CADGEN_ENGINE_DIR": str(self.state), "CADGEN_STATE_DIR": str(own / "state"),
+        private = {"CADGEN_PORT": str(engine_daemon.free_port()), "CADGEN_ENGINE_DIR": str(self.state), "CADGEN_STATE_DIR": str(own / "state"),
                    "CADGEN_CACHE_DIR": str(own / "cache")}
         self.env = engine_daemon.watched({**os.environ, "PYTHONPATH": str(SRC), **private,
                                           "CADGEN_ENGINE_MESH": "inline",
@@ -503,6 +503,7 @@ class DaemonPoolTest(unittest.TestCase):
         # This process asks the test's daemon what it holds (``status``), never starting one.
         self.enterContext(mock.patch.dict(os.environ, private))
         self.addCleanup(self._stop)
+        engine_daemon.bootstrap(self.env)
 
     def _stop(self) -> None:
         self.cli("stop")
@@ -592,6 +593,8 @@ class DaemonPoolTest(unittest.TestCase):
             await_(ready, "a standby with the kernel loaded", 120)
             return found
 
+        self.cli("stop")
+        engine_daemon.bootstrap(env)
         self.script("a")
         self.build("a", env)  # the standby stands by in a's environment from now on
         spare = standby()

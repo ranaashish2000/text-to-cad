@@ -138,27 +138,43 @@ npm run build:packages
 
 ### The engine server
 
-Every build, export and snapshot runs in cadgen's engine server, a daemon: one per
-installation (the interpreter and the engine folder it runs), started by the first
-command that needs it and running until `cadgen stop` (no timer stops it), so a worktree's
-checkout gets a daemon of its own. Its door, a named pipe (on Windows, a port file), and lock live in `cadgen-engine`
-in `$XDG_RUNTIME_DIR`, else in the per-user temporary folder (on macOS the system's
-`/var/folders/...` one, whatever `$TMPDIR` a sandbox sets; else a per-user `$TMPDIR`), else in `/tmp/cadgen-<uid>`
-(Windows: the temporary folder); `CADGEN_ENGINE_DIR` moves them, which gives a
-test, a benchmark or an experiment a daemon to itself. `cadgen status` lists its
-workers, one per model script, each with its memo, and what each is building;
-`cadgen stop` stops it (`cadgen server` runs one in the foreground); a running `cadgen mcp` holds it,
-so no other installation retires it: one wanting its port rolls past it (or refuses a port it was named). A running daemon keeps the engine code it started with:
-after editing `packages/cadgen/src/cadgen`, stop the daemon you started so the next
-build runs the new code. Never stop one you did not start.
+Start the engine explicitly with the checkout's `.venv/bin/cadgen server`, or
+let the MCP bootstrap start or attach to it. Model scripts run with the project's
+Python, with the same cadgen release installed, and attach to the selected engine.
+A project worker runs in that interpreter and imports that environment's dependencies.
+Client, server and worker release versions must match exactly. A missing server or
+version mismatch fails; no model or CLI document operation starts one or falls back
+locally. `Model.build(daemon=False)`, `export(..., daemon=False)` and
+`snapshot(..., daemon=False)` are explicit offline operations: cold, in the calling
+process, with no live document or page.
+
+Project/helper source changes are loaded on the next model run, including editable
+project packages, while the worker keeps its kernel. After installing, upgrading or
+reinstalling dependencies, restart your own selected engine (`cadgen stop`, then
+`cadgen server`) and any long-lived calling Python process before running the model again.
+Installed packages are not watched. Direct edits inside cadgen or installed libraries
+require reinstalling that distribution before restarting.
+
+The engine is selected by port: `--port` where the CLI accepts it, else
+`CADGEN_PORT`, else 3245. A port must be 1–65535. Bootstrap reuses a compatible
+selected engine; a conflicting listener fails. There is no rollover or retirement
+of another engine. Give worktrees and tests distinct ports
+when they need distinct engines. `cadgen status` and `cadgen stop` address only the
+selected engine; never stop an instance you did not start.
+
+The private door (a named pipe; on Windows a port file) and lock live in
+`cadgen-engine` in `$XDG_RUNTIME_DIR`, else in the per-user temporary folder
+(on macOS the system's `/var/folders/...` one, whatever `$TMPDIR` a sandbox sets),
+else `/tmp/cadgen-<uid>`. `CADGEN_ENGINE_DIR` moves this private IPC directory,
+not the selected port. Clients in different project environments resolve the same
+port's door there. Tests and benchmarks use their own directory, port, state and cache.
 
 The engine's switches are environment variables, never script options (the
 engine's README, **The engine server and its workers** and **Body retention**):
 `CADGEN_ENGINE_WORKERS`, `CADGEN_ENGINE_WORKER_RSS_MB` (the workers' memory cap, together; no timer
 retires a worker), `CADGEN_ENGINE_MEMORY_MB` (the daemon's one memory budget,
 **Document lifetime**), `CADGEN_ENGINE_CACHE_IDLE` (the document cache's idle seconds, the
-tests' seam), `CADGEN_ENGINE_PORT` (its HTTP port,
-`0` for any free one, refused when held; unset, 3245, else the next free port, kept per installation), `CADGEN_ENGINE_MEMO=0` (no memo
+tests' seam), `CADGEN_PORT` (the selected engine's fixed HTTP port), `CADGEN_ENGINE_MEMO=0` (no memo
 hits), `CADGEN_ENGINE_BODIES=0` (no body replay), `CADGEN_ENGINE_MESH=processes|inline`,
 `CADGEN_ENGINE_THREE` (the three.js folder `cadgen serve` pages load) and
 `CADGEN_VIEWER_WARM=0` (no engine warm-up at `cadgen viewer`'s launch). What the
@@ -168,7 +184,9 @@ opened file (`documents/<uuid>/document.json`: the script and function that buil
 the file's path; never geometry). In the cache folder (`CADGEN_CACHE_DIR`, else the platform's:
 `~/.cache/cadgen`) it keeps each model document's bytes as last built,
 `documents/<uuid>/document.xbf`, regenerable and wiped at no loss, so a restart reopens
-every document without a build, and under `pycache/` the bytecode the daemon and its
+saved documents without a build. Document records, Recents, thumbnails and cached
+document bytes are shared across ports. Preferences, token and installation records
+are shared too. Under `pycache/` it keeps the bytecode the daemon and its
 workers compile of the libraries they load (`PYTHONPYCACHEPREFIX`); it touches nothing else in
 that folder, which a 0.7 install's store may share. Tests point both folders at temporary ones
 (`scripts/test/unittest_files.py` does).
@@ -212,10 +230,11 @@ a copy of the `apps/mcp` page built for that install (`--no-build` reuses the la
 build). That `.venv` is registered as that install's version (`<VERSION>-dev.<time>`),
 the copied skills run `cadgen +<VERSION>-dev.<time>` and the proxy is written (the server
 registers it again at each start, told the version by `CADGEN_INSTALLATION_VERSION`;
-`--uninstall` takes the record out), so the server and the agent's scripts share this
-checkout's installation and its engine daemon;
-each worktree is an installation of its own (one daemon per installation), so
-several can be installed side by side, one per app. With `--wheel`, the checkout's
+`--uninstall` takes the record out). Model scripts use the project's actual Python
+with this checkout installed editable there. Server and client use the same selected
+port. Set `CADGEN_PORT` when running the installer to copy that selection into
+the MCP config and skill instructions; use it in the project environment too.
+Choose distinct ports to test worktrees side by side. With `--wheel`, the checkout's
 wheel is built as the release builds it (`bundle.sh`, then `uv build`), the
 server runs it through `uvx --from <wheel>` and that installation is the one
 registered as the install's version: exactly what users get, each build its own
@@ -556,7 +575,8 @@ VIEWER_PYTHON=<checkout>/.venv/bin/python \
   npm --prefix <checkout>/apps/web run dev -- --host 127.0.0.1
 ```
 
-Vite announces itself to the installation's engine with an API-only launch.
+Start your checkout's engine explicitly first, on the selected `CADGEN_PORT`.
+Vite announces itself to that engine with an API-only launch.
 Closing Vite leaves that engine and its other clients running. `VIEWER_PYTHON`
 must name an interpreter that satisfies cadgen's Python floor and imports this
 checkout. The backend opens any file by its absolute path. The web app owns
@@ -564,12 +584,12 @@ URL/history and browser preferences. FileViewer
 state is scoped by file and renderer; each CAD render session owns its
 cache provider and worker lease.
 
-`cadgen viewer [FILE ...]` ensures the installation's engine, opens its one page -- each
+`cadgen viewer [FILE ...]` attaches to the selected engine and opens its one page -- each
 FILE's at `/<id>`, else the home -- and exits. `--json` prints the authenticated launch record
 without opening a browser. Each launch's folder becomes the folder the home shows.
-An explicit `--host` or `--port` pins the engine listener; a conflict with an
-already-running engine fails. The engine's default port is 3245, rolled past when another
-program holds it (`cadgen status` says which); there is no viewer process of its own.
+An explicit `--port` selects the engine; `CADGEN_PORT` selects it otherwise,
+with 3245 the default. An explicit `--host` must match the engine's listener.
+The launcher never starts or replaces an engine; there is no viewer process of its own.
 A checkout serves its local web build; `CADGEN_VIEWER_DIST` and
 `CADGEN_MCP_APP_DIR` are explicit asset overrides. A wheel resolves its
 bundled assets without the repository. Run `scripts/bundle/bundle.sh` after
@@ -800,7 +820,7 @@ green: that is the release. `Publish Release`, on the merge commit:
    the CAD app can name, by the debug id its build stamped on it, with its map
    -- a page whose maps PostHog could not use stops the release here.
 4. **Install test.** The built wheel into a fresh venv — `cadgen --help`,
-   `cadgen viewer --help`, `cadgen doctor --no-server skills/cad` — then
+   `cadgen viewer --help`, `cadgen doctor skills/cad` — then
    `scripts/test/test-installed.sh --wheel <built-wheel>`; the distribution is
    uploaded as a workflow artifact (`cadgen-<version>`).
 5. **Source maps, then PyPI** (on `main` only). The maps go to PostHog first

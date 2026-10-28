@@ -20,7 +20,7 @@ export const support = {
 // backticks, which the page sets as code.
 export const howItWorks = [
   "Your agent writes each model as a Python script with build123d, built on Open CASCADE.",
-  "Running the script, `python model.py`, builds the model with cadgen's engine into an `.xbf` document (its parts, names, colours, materials and joints) and the STEP, GLB, STL or 3MF files the script declares. The engine keeps each model's work in memory, so an edit rebuilds only what it changed.",
+  "With cadgen's engine running, `python model.py` uses the project's Python environment to build an `.xbf` document (its parts, names, colours, materials and joints) and the STEP, GLB, STL or 3MF files the script declares. The engine keeps each model's work in memory, so an edit rebuilds only what it changed.",
   "The CAD viewer shows the model in your agent app or your browser, and follows every rebuild.",
 ];
 
@@ -33,7 +33,7 @@ export const agentInstallMessage = "Install text-to-cad from https://github.com/
 // not updated yet is never told less than it sends; the cadgen a person runs says the rest itself. The
 // README says it word for word. The command is in backticks, which the page sets as code.
 export const telemetryNote =
-  "By default, text-to-cad sends usage stats and crash reports, tagged with a random ID and never including your files, paths or prompts; turn them off with `uvx --no-config --managed-python --python 3.13 --from cadgen==0.8.1 cadgen telemetry off`, or ask your agent to.";
+  "By default, text-to-cad sends usage stats and crash reports, tagged with a random ID and never including your files, paths or prompts; turn them off with `uvx --no-config --managed-python --python 3.13 --from cadgen==0.8.2 cadgen telemetry off`, or ask your agent to.";
 // The same message, opened in an agent app with its composer prefilled, never sent: Claude Code in
 // Claude Desktop (claude://code/new, Claude's help center, "Open Claude Desktop with a link"), the
 // Codex app (codex://threads/new, its commands reference) and Cursor (its prompt deeplink, Cursor's
@@ -54,6 +54,7 @@ export const installs = [
   {
     id: "claude-code",
     agent: "Claude Code",
+    note: "Claude Desktop's Code tab uses this plugin. Its regular Chat tab needs separate local MCP setup; Cowork uses the plugin's bundled MCP server.",
     command:
       "claude plugin marketplace add earthtojake/text-to-cad#latest\nclaude plugin install text-to-cad@earthtojake",
     update: "claude plugin marketplace update earthtojake\nclaude plugin update text-to-cad@earthtojake",
@@ -100,7 +101,7 @@ export const installs = [
   {
     id: "other-agents",
     agent: "Other Agents",
-    note: "For an agent without plugin support: the skills give you everything you need for core CAD workflows and let you view CAD files in a localhost web app.",
+    note: "For an agent without plugin support: the skills give you everything you need for core CAD workflows and let you view CAD files in a localhost web app. Follow the skill's setup instructions to install cadgen and start `cadgen server`. Run model scripts with the project's Python environment, with the matching cadgen release and any other project dependencies installed.",
     command: "npx skills add earthtojake/text-to-cad#latest",
   },
 ];

@@ -27,15 +27,15 @@ def parse_args(argv=None, *, prog=DEFAULT_PROG):
     parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     parser.add_argument('files', nargs='*', metavar='FILE',
                         help='a CAD file to open (or a document id the engine holds): its page is /<id>')
-    parser.add_argument('--host', default=None, help='Pin the engine bind address; default loopback.')
-    parser.add_argument('--port', type=int, default=None, help='Pin this installation’s engine HTTP port.')
+    parser.add_argument('--host', default=None, choices=['127.0.0.1'], help='The engine loopback address.')
+    parser.add_argument('--port', type=int, default=None, help='Select a running engine (else CADGEN_PORT, else 3245).')
     parser.add_argument('--json', action='store_true', help='Print launch information without opening a browser.')
     parser.add_argument('--no-open', action='store_true', help='Print the URL without opening a browser.')
     parser.add_argument('--dist', default='', help='Built viewer client directory.')
     parser.add_argument('--api-only', action='store_true', help='Announce the engine for a Vite frontend, without its client build.')
     options = vars(parser.parse_args(argv))
-    if options['port'] is not None and not 0 <= options['port'] <= 65535:
-        parser.error('--port must be between 0 and 65535')
+    if options['port'] is not None and not 1 <= options['port'] <= 65535:
+        parser.error('--port must be between 1 and 65535')
     return options
 
 
@@ -43,6 +43,8 @@ def main(argv=None, *, prog=DEFAULT_PROG):
     from cadgen.engine import client
     from cadgen.engine.client import request
     options = parse_args(argv, prog=prog)
+    if options['port'] is not None:
+        os.environ['CADGEN_PORT'] = str(options['port'])
     # The engine started for this page says so, as every verb's does (``cadgen.engine.cli.answered``).
     client.on_started = lambda: print('engine started', file=sys.stderr, flush=True)
     options['start'] = os.getcwd()

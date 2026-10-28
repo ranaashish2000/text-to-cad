@@ -1,7 +1,7 @@
 # CAD Viewer
 
 A local-filesystem CAD review app. This directory is the React CLIENT; the
-backend is the installation's engine, hosting the `cadgen.viewer` HTTP app.
+backend is the engine selected by port, hosting the `cadgen.viewer` HTTP app.
 The built client ships inside the same wheel. `cadgen viewer [FILE ...]` opens the
 engine's one page and exits. The page addresses every document by path, `/<uuid>`: a
 model's id, or a file's id once a launcher (or the page itself) registers it, derived from
@@ -84,7 +84,8 @@ qualifies, Vite defaults to the app's parent, `<checkout>/apps`. npm sets
 without changing that folder. It is only the folder a launch's relative files are read from
 (`serverInfo.start`, the most recent launch's): the backend opens any file by its absolute path.
 
-Dev announces itself to the same engine with
+Start the checkout's engine explicitly first (`.venv/bin/cadgen server`), on the
+selected `CADGEN_PORT`. Dev announces itself to that engine with
 `python -m cadgen.viewer --api-only --json` (a launch, from its folder), then
 proxies `/__cad` with the engine token. Vite owns the client and closing it leaves the engine
 running. `VIEWER_PYTHON` names the interpreter with cadgen installed (default `python3`).
@@ -104,23 +105,28 @@ export CADGEN_VIEWER_DIST="$PWD/apps/web/dist"
 cadgen viewer --host 127.0.0.1 --json [FILE ...]
 ```
 
-The launcher ensures this installation's engine and its one page, registers each FILE (an
+The launcher attaches to the selected engine and its one page, registers each FILE (an
 on-disk CAD file, or a document id the engine holds) by its id, prints its page's URL
 (`/<id>`, a line each; the home's, `/`, with none), opens the first in the browser, and exits. `--json` prints the launch
 record without opening a browser; `--no-open` prints only the URL. There is no
 foreground viewer server and no `--detach` or `viewer stop`. `cadgen stop` stops
-the installation's engine and all its clients; never stop an engine you did not start.
+the selected engine and all its clients; never stop an engine you did not start.
 
-`cadgen serve DOC` also starts or reuses this engine, prints the document URL and
+`cadgen serve DOC` also attaches to this engine, prints the document URL and
 exits. It has no `--foreground` or standalone server mode.
 
-The engine binds loopback on 3245, or, when another program holds it, the next free
-port, which the installation keeps (`cadgen status` says which and why). `--port N`
-pins its HTTP port and `--host ADDRESS` pins its bind address. If the running engine has a different
-port or address, the launch fails with that conflict; it never replaces a server
-or starts a second engine. A taken port that `--port` names fails, naming its holder. There are no page sessions: every launch
-reuses the one page, and its folder replaces the last launch's as the one its relative files are read from.
-`--dist DIR` (or `CADGEN_VIEWER_DIST`) selects a built client.
+Start the engine explicitly with `cadgen server`, or through MCP bootstrap.
+It binds loopback on 3245 by default. `CADGEN_PORT` selects another fixed port;
+CLI `--port N` takes precedence where supported. Bootstrap reuses a compatible selected engine; a conflicting listener fails, with no
+rollover or retirement of another engine occurs. Launchers only attach and must
+have exactly the running engine's cadgen release. `--host ADDRESS` must match
+the engine's bind address. There are no page sessions: every launch reuses the
+page and its folder resolves its relative files. `--dist DIR` (or
+`CADGEN_VIEWER_DIST`) selects the built client.
+
+The persistent document catalog, cached bytes, Recents and thumbnails are shared across
+ports, as are preferences, installation records and the page token. Port selection
+still chooses the live engine and its workers.
 
 The JSON record includes `url`, `apiUrl`, `token`, `port`, `pid`, `start` (the folder the home
 shows), `documents` (`{id, file, url}` for each FILE) and `action` (`started` or `reused`,
@@ -143,8 +149,8 @@ language, over the page until a read answers again. One whose engine runs and re
 viewer` and open the link it prints; it keeps asking, never reloads for the refusal, and heals
 once that link, opened beside it, has left the new cookie.
 
-A page closing never stops the engine, and no timer does: it runs until `cadgen stop`, or
-until a newer installation's engine retires it while nothing uses it.
+A page closing never stops the engine, and no timer does: it runs until an explicit
+stop, termination, loss of its private door or machine shutdown.
 Code changes in a checkout require
 restarting an engine you own, then rerunning the launcher. Vite handles client HMR.
 
@@ -392,7 +398,7 @@ the update button at the right while a newer text-to-cad is out. The home is a s
 the browser's history, as a file is: the browser's Back and Forward walk between them (the
 navbar draws no arrows of its own here). A `/<id>` the server knows no file for, and no model the engine
 holds, shows "This model is no longer held" with the engine's words -- the command that builds it
-again, `cadgen run <the program that built it>` -- and Go home, titled for the state the engine
+again, `python <the program that built it>` -- and Go home, titled for the state the engine
 names: "This model is not saved" (`unsaved`) or "This model’s script is gone" (`detached`); a file
 that is not there shows "File does not exist".
 
@@ -414,7 +420,7 @@ screen says it was opened once the catalog has it (`{action: "open"}`: a file jo
 library, a model's record notes the time), and its picture
 once it has settled — the model framed whole from the default direction, whatever the
 camera (`{action: "thumbnail"}`). `cadgen.viewer.recents` keeps the library in the
-user's state directory, shared with the CAD app.
+shared state root, used by CAD app and browser clients across ports.
 
 ### Usage stats (telemetry)
 

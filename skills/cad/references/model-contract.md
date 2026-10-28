@@ -59,8 +59,12 @@ if __name__ == "__main__":
   module search path, so a module beside it imports by its own name. A script inside a
   package (its folder holds an `__init__.py`) is that package's module, so its relative
   imports (`from ..lib.dims import WIDTH`) work under `python proj/parts/block.py` and
-  `python -m proj.parts.block` alike. An edit to any module it imports is read on the
-  next run.
+  `python -m proj.parts.block` alike. An edit to a project module it imports is read on
+  the next run, including source in an editable project (`pip install -e .`). No manual
+  reload or engine restart is needed; the worker keeps its kernel and rebuilds affected
+  work. After installing, upgrading or reinstalling dependencies, restart your own
+  selected engine (`cadgen stop`, then `cadgen server`) and any long-lived calling
+  Python process before running the model again. Keep the same `CADGEN_PORT`.
 - **`import build123d as bd` costs nothing until it is used.** cadgen makes the import of
   `build123d` (and `OCP`) lazy: the module binds at once and the kernel loads on the
   first attribute anything reads from it, in the worker that builds the model. `from
@@ -294,12 +298,17 @@ script's folder and that name, independent of which file in the folder declares 
 names in one folder are refused with both declaration locations. A model's name is its identity
 within its namespace, the function's name by default, `name=` gives it another. In 0.8 the namespace
 is the script's folder, with no project detection. Moving a named model to another file of its folder
-keeps its id: run the file it left with `cadgen run` (or delete it) first, since until then the engine
+keeps its id: run the file it left with its project Python (or delete it) first, since until then the engine
 knows that file by its last run, and refuses the new file's declaration naming both. The page is
 `/<id>` on the engine's address; `cadgen export`, `snapshot` and `inspect`, and the
 CAD app's tools, take the id and read the document as the engine holds it. No command
 imports, runs or builds a script: editing the script changes nothing until Python runs
-it again.
+it again. A live document handle retains its original engine selection. Changing
+`CADGEN_PORT` or `CADGEN_ENGINE_DIR` makes its shape reads, exports and snapshots
+fail instead of redirecting them; restore the selection to use that handle again.
+A raw document id addresses the currently selected engine explicitly. Saved documents,
+cached bytes, Recents and thumbnails are shared across ports, as are preferences and
+the user token. Live workers remain with their engine.
 
 - **Documents outlive their workers.** A document stays held after its script's worker
   retires (`cadgen status`: `live` with its worker, `held` without one, where `made_by`
@@ -307,21 +316,23 @@ it again.
   machine's) that never drops a document a page watches.
 - **The engine never reruns code.** A document it no longer holds (its file in the engine's
   cache deleted, or never saved) is refused with the command that
-  brings it back, `cadgen run <the script that defines it>`, by the page, `cadgen inspect`
+  brings it back, `python <the script that defines it>`, by the page, `cadgen inspect`
   and `cad_show` alike (`cadgen status`: `unsaved`, or `detached` once its script is gone).
   Running it updates the same document and its open pages.
 - **Each document has a record** in cadgen's state folder (`documents/<uuid>/document.json`:
-  the script and function that build it (the rebuild command is always `cadgen run` of that script); never
+  the script and function that build it (the rebuild command is `python` of that script in its project environment); never
   geometry). The home lists the records, models and files alike, pinned first, then by
   last activity. A record whose
   script is gone is detached: listed, saying so, with no rebuild command. Nothing else is
   written beside your files: no record of a run.
 - **A restart reopens what was built.** The engine keeps each model document's bytes in
-  the platform's cache folder (`~/.cache/cadgen/documents/`), once it is idle, so after a
-  restart its id answers every verb as last built (`cadgen status`: `held`, on `disk`).
+  the shared cache folder's `documents/`, once it is idle, so after a
+  restart its id answers every verb as last built (`cadgen status`: `held`, on `disk`),
+  when its saved format is supported. An unsupported format or failed conversion
+  reports an error while preserving the saved bytes and document record.
   A document is what its last run made: the engine never checks the code on disk against
   it, no surface says the script changed, and nothing reruns. After an edit, run the script
-  (`cadgen run /work/arm.py`) to update the document and its open pages.
+  (`python /work/arm.py`) to update the document and its open pages.
   The cache keeps every document until you delete it (`cadgen delete <id>`, or a script's
   path for every document of it, or Delete in a card's menu on the home); nothing evicts
   from it. Deleting removes the record and the cached document, never a file.
@@ -334,11 +345,21 @@ it again.
   it again: its record says a program the engine did not run showed it, so run that
   program again. A decorated function in no saved file is refused, with these words.
 - `cadgen status` lists the workers and the documents the engine holds (`--json` as
-  data); `cadgen stop` stops the engine and any older one still running. At most
+  data); `cadgen stop` stops only the selected engine. At most
   `CADGEN_ENGINE_WORKERS` workers live (default: the machine's cores); a worker is retired only
   when the workers' memory is over `CADGEN_ENGINE_WORKER_RSS_MB`, never for idleness,
   and its script's next run starts cold. `CADGEN_ENGINE_DIR` moves the
-  engine's door and lock (one engine per folder).
+  private IPC directory. `CADGEN_PORT` selects the engine there (default 3245);
+  callers in different Python environments attach to the same selected engine.
+
+For an explicit offline build, use `bracket.build(daemon=False)` from Python.
+It runs cold in that process, requires no server and serves no live document or URL.
+`export(..., daemon=False)` and `snapshot(..., daemon=False)` likewise operate locally.
+These modes are chosen explicitly; a failed server connection never falls back to them.
+A release mismatch requires the same cadgen release in the project and selected server;
+update the project pin or explicitly restart an engine you own with the intended release.
+Native interchange also requires matching OCP provider versions and document format;
+project-only Python dependencies may differ and remain in their own environments.
 
 ## Progress and the report
 

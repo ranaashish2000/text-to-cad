@@ -50,7 +50,7 @@ MIRRORS: dict[str, tuple[str, str]] = {
 # The engine snapshot's options (``cadgen.engine.snapshot``), which every format's snapshot
 # command takes: one parser, one picture.
 SNAPSHOT = frozenset({"document", "out", "job", "display", "grid", "camera", "preview", "width", "height",
-                      "size_profile", "pose", "annotation", "measurements", "json"})
+                      "size_profile", "pose", "annotation", "measurements", "json", "port"})
 
 # Commands with a HAND-WRITTEN parser, and the option surface each one owns. An adapter has no
 # generated parser to compare against a signature, so the declaration IS the contract, and a
@@ -69,21 +69,19 @@ ADAPTERS: dict[str, frozenset[str]] = {
     # The person's telemetry choice: status, on or off.
     "telemetry": frozenset({"action"}),
     # The engine's verbs (cadgen.engine.cli), each a command of its own.
-    "export": frozenset({"source", "destinations", "json"}),
+    "export": frozenset({"source", "destinations", "json", "port"}),
     "snapshot": SNAPSHOT,
     "serve": frozenset({"document", "port", "three"}),
-    "inspect": frozenset({"document", "ref", "query", "json"}),
-    "status": frozenset({"json"}),
-    "stop": frozenset({"json"}),
-    "delete": frozenset({"documents", "json"}),
+    "inspect": frozenset({"document", "ref", "query", "json", "port"}),
+    "status": frozenset({"json", "port"}),
+    "stop": frozenset({"json", "port"}),
+    "delete": frozenset({"documents", "json", "port"}),
     "server": frozenset({"port", "rotate_token"}),
 }
 
 # Commands that own their parser outright and mirror no function.
 UNCLASSIFIED = {
     "doctor",
-    # The installation's python with the arguments, whatever they are: no parser of its own.
-    "run",
     # The viewer launcher owns its parser: the launch contract (reuse, replace or start on its
     # one port, the --json announce line) is not a function signature to mirror.
     "viewer",

@@ -25,7 +25,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.python.support.paths import repo_path
+from tests.python.support.paths import add_repo_path, repo_path
+
+add_repo_path("packages/cadgen/src")
+from cadgen.cli import read_skill_pin  # noqa: E402
 
 SYNC_SCRIPT = repo_path("scripts", "release", "sync-version.mjs")
 
@@ -117,6 +120,16 @@ class VersionSyncMirrorTests(unittest.TestCase):
                 if repo_path(relative).is_file():
                     (root / relative).parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(repo_path(relative), root / relative)
+            # A compact main file owns only its CLI pin; setup is linked, migrations are historical.
+            fixture = root / "skills/fixture"
+            (fixture / "references").mkdir(parents=True)
+            (fixture / "SKILL.md").write_text("`cadgen` below means `~/.local/bin/cadgen +1.2.3`\n"
+                                               "[Setup](references/setup.md) [Migration](references/migrations.md)\n", encoding="utf-8")
+            (fixture / "references/setup.md").write_text("uvx --from cadgen==1.2.3 cadgen doctor\n"
+                                                          "python -m pip install cadgen==1.2.3\n"
+                                                          r"%USERPROFILE%\.local\bin\cadgen.cmd +1.2.3" + "\n", encoding="utf-8")
+            historical = "An older release used cadgen==0.1.0 and cadgen +0.1.0.\n"
+            (fixture / "references/migrations.md").write_text(historical, encoding="utf-8")
             (root / "VERSION").write_text("9.9.9\n", encoding="utf-8")
             result = subprocess.run(["node", str(root / "scripts/release/sync-version.mjs")],
                                     capture_output=True, text=True, timeout=120)
@@ -124,13 +137,24 @@ class VersionSyncMirrorTests(unittest.TestCase):
             manifest = json.loads((root / "gemini-extension.json").read_text(encoding="utf-8"))
             self.assertEqual(manifest["version"], "9.9.9")
             self.assertIn("cadgen==9.9.9", manifest["mcpServers"]["cad"]["args"])
-            # Every cadgen skill's launch command moves with the server's, so they stay one installation.
+            self.assertEqual(read_skill_pin(fixture / "SKILL.md"), "9.9.9")
+            self.assertEqual(read_skill_pin(fixture / "references/setup.md"), "9.9.9")
+            self.assertIn("python -m pip install cadgen==9.9.9", (fixture / "references/setup.md").read_text(encoding="utf-8"))
+            self.assertIn("cadgen.cmd +9.9.9", (fixture / "references/setup.md").read_text(encoding="utf-8"))
+            self.assertEqual((fixture / "references/migrations.md").read_text(encoding="utf-8"), historical)
+            # Bootstrap, CLI and project dependency pins move together.
             skill = (root / "skills/cad/SKILL.md").read_text(encoding="utf-8")
-            self.assertIn("--from cadgen==9.9.9 cadgen doctor`", skill)
-            # And so does the version it runs by the `cadgen` command, and the refusal it names.
-            self.assertIn("`cadgen +9.9.9`", skill)
-            self.assertIn("`python` below means `cadgen +9.9.9 run`", skill)
-            self.assertIn("it says 9.9.9 is not installed", skill)
+            self.assertEqual(read_skill_pin(root / "skills/cad/SKILL.md"), "9.9.9")
+            self.assertIn("`~/.local/bin/cadgen +9.9.9`", skill)
+            self.assertIn("`python` below means the project's Python interpreter", skill)
+            setup = root / "skills/cad/references/setup.md"
+            self.assertEqual(read_skill_pin(setup), "9.9.9")
+            guide = setup.read_text(encoding="utf-8")
+            self.assertIn("--from cadgen==9.9.9 cadgen doctor", guide)
+            self.assertIn("python -m pip install cadgen==9.9.9", guide)
+            self.assertIn("--from cadgen==9.9.9 cadgen server", guide)
+            self.assertIn("--from cadgen==9.9.9 cadgen server",
+                          (root / "packages/cadgen/README.md").read_text(encoding="utf-8"))
             # So does the turn-off command the README and the docs site print.
             for page in ("README.md", "apps/docs/src/lib/content.ts", "apps/docs/src/app/privacy-policy/page.tsx"):
                 self.assertIn("--from cadgen==9.9.9 cadgen telemetry off", (root / page).read_text(encoding="utf-8"))

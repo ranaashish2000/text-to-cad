@@ -222,7 +222,7 @@ test('a page whose engine is gone says so in its language, over the page, until 
     catalog = 'stopped';
     await act(() => client.refresh({ file: ONE }).catch(() => {}));
     assert.match(alert()?.textContent ?? '', /エンジンが動いていません。戻るとページは自動で再接続します。/);
-    assert.match(alert()?.textContent ?? '', /cadgen run <script>\.py か cadgen viewer を実行して起動してください。/);
+    assert.match(alert()?.textContent ?? '', /cadgen server を実行して起動してください。/);
     // The one notice: the page under it, a view's own card among it, is out of reach and unheard.
     assert.equal(window.document.querySelectorAll('[role="alert"]').length, 1);
     const under = alert()?.nextElementSibling;
@@ -254,7 +254,7 @@ test('the notice says the page reconnects, and how to start the engine', async (
   try {
     await act(() => root.render(createElement(EngineStopped, { locale: 'en' })));
     assert.equal(dom.window.document.querySelector('[role="alert"]')?.textContent,
-      'The engine is not running; the page reconnects when it is back.Run cadgen run <script>.py or cadgen viewer to start it.');
+      'The engine is not running; the page reconnects when it is back.Run cadgen server to start it.');
     await act(() => root.render(createElement(EngineStopped, { locale: 'en', refused: true })));
     assert.equal(dom.window.document.querySelector('[role="alert"]')?.textContent,
       "This page's link was replaced; the page reconnects once its new link is opened.Run cadgen viewer and open the link it prints.");

@@ -21,6 +21,10 @@ from tests.python.support import engine_daemon
 
 SRC = Path(__file__).resolve().parents[5] / "packages" / "cadgen" / "src"
 
+
+def setUpModule():
+    engine_daemon.isolate(unittest.addModuleCleanup, start=False)
+
 MODEL = """
 import build123d as bd
 from cadgen.engine import xbf
@@ -164,7 +168,9 @@ class WorkerLoopTest(unittest.TestCase):
             self.frames.put(None)
 
         threading.Thread(target=read, daemon=True).start()
-        self.assertIn("ready", self.next())
+        ready = self.next()
+        self.assertIn("ready", ready)
+        self.execution = ready["execution"]
 
     def _stop(self) -> None:
         self.worker.stdin.close()
@@ -178,7 +184,7 @@ class WorkerLoopTest(unittest.TestCase):
 
     def ask(self, ident: int, functions: list | None = None, run: str | None = None) -> None:
         request = {"id": ident, "op": "build", "script": str(self.script), "functions": functions,
-                   "cwd": str(self.folder), "run": run}
+                   "cwd": str(self.folder), "run": run, "execution": self.execution}
         self.worker.stdin.write((json.dumps(request) + "\n").encode())
         self.worker.stdin.flush()
 
@@ -373,7 +379,7 @@ class SandboxTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CODEX_SANDBOX": "seatbelt", "CODEX_SANDBOX_NETWORK_DISABLED": "1"}), \
                 mock.patch.object(client, "_start", side_effect=AssertionError("a daemon was started")):
             with self.assertRaises(ConnectionError) as said:
-                client.request({"op": "status"})
+                client.connect(start=True)
         self.assertEqual(str(said.exception), client.SANDBOXED)
         self.assertNotIn("\n", client.SANDBOXED)
 
@@ -407,10 +413,10 @@ class SandboxTest(unittest.TestCase):
         with mock.patch.object(client, "_start", lambda: Exited(note)):
             with self.assertRaisesRegex(ConnectionError, "^" + re.escape(client.SANDBOXED)
                                         + r" \(the engine server cannot listen on a local port: Operation not permitted\)$"):
-                client.connect(timeout=30)
+                client.connect(start=True, timeout=30)
         with mock.patch.object(client, "_start", lambda: Exited({"reason": "it broke", "denied": False})):
             with self.assertRaisesRegex(ConnectionError, r"^the engine server did not start: it broke$"):
-                client.connect(timeout=30)
+                client.connect(start=True, timeout=30)
 
 
 class EngineFolderTest(unittest.TestCase):
@@ -555,7 +561,9 @@ class WindowsTokenFirstTest(unittest.TestCase):
         from cadgen.engine import daemon
 
         handled = []
-        engine = types.SimpleNamespace(token="ab" * 16, refusal=None, unsaid="",
+        from cadgen.engine.previous import version
+        engine = types.SimpleNamespace(token="ab" * 16, refusal=None, unsaid="", release_version=version(),
+                                       port=daemon.selected_port(), instance="test-instance",
                                        handle=lambda request, send: handled.append(request) or send({"ok": True}))
         server_side, client_side = socket.socketpair()
         self.addCleanup(client_side.close)
@@ -609,6 +617,12 @@ class WindowsTokenFirstTest(unittest.TestCase):
             with theirs:
                 stream = theirs.makefile("rwb")
                 sent.append(stream.readline())
+                hello = json.loads(sent[-1])
+                identity = {key: hello[key] for key in ("protocol", "release", "port")}
+                identity["instance"] = "test-instance"
+                stream.write((json.dumps({"ok": True, **identity}) + "\n").encode())
+                stream.flush()
+                sent.append(stream.readline())
                 stream.write(b'{"ok": true}\n')
                 stream.flush()
 
@@ -619,9 +633,10 @@ class WindowsTokenFirstTest(unittest.TestCase):
             connection = client.Connection(stream, stream, stream, ours)
             self.assertEqual(client._exchange(connection, {"op": "status"}, address=port_file), {"ok": True})
         answering.join(timeout=30)
-        self.assertTrue(sent[0].startswith(b'{"token": "' + token.encode() + b'", "op": "status"'))
-        handled, _token = self.serve(sent[0])
-        self.assertEqual(handled, [{"token": token, "op": "status"}])
+        self.assertTrue(sent[0].startswith(b'{"token": "' + token.encode() + b'", "op": "hello"'))
+        self.assertTrue(sent[1].startswith(b'{"token": "' + token.encode() + b'", "op": "status"'))
+        handled, _token = self.serve(b''.join(sent))
+        self.assertEqual(handled, [json.loads(sent[1])])
 
 
 class NoTimerTest(unittest.TestCase):
@@ -775,7 +790,7 @@ class DaemonEnvironmentTest(unittest.TestCase):
                 pass
 
             def popen(argv, **kwargs):
-                found["worker" if argv[-1].endswith("worker") else "daemon"] = kwargs["env"]
+                found["worker" if any("cadgen.engine.worker" in item for item in argv) else "daemon"] = kwargs["env"]
                 raise Captured
 
             with mock.patch.object(subprocess, "Popen", popen):
@@ -840,51 +855,42 @@ class SweepTest(unittest.TestCase):
         self.assertEqual((done.returncode, done.stdout), (0, "no engine server is running\n"), done.stderr)
         self.assertEqual(done.stderr, f"removed stale engine file {path}\n", "a swept file a line on stderr")
 
-    def test_status_starts_no_engine_a_verb_that_starts_one_says_so_and_stop_leaves_none(self) -> None:
+    def test_status_and_inspection_start_nothing_and_explicit_bootstrap_can_be_stopped(self) -> None:
         self.env.update(CADGEN_STATE_DIR=str(self.state / "state"), CADGEN_CACHE_DIR=str(self.state / "cache"))
-        for _ in range(2):
-            done = self.cli("status")
-            self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "no engine server is running\n", ""))
-        self.assertEqual(list(self.state.iterdir()), [], "status started nothing")
+        done = self.cli("status")
+        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "no engine server is running\n", ""))
         unknown = "00000000-0000-5000-8000-000000000000"
-        first, again = self.cli("inspect", unknown), self.cli("inspect", unknown)
-        self.assertEqual((first.returncode, first.stderr.splitlines()[0]), (2, "engine started"), first.stderr)
-        self.assertNotIn("engine started", again.stderr, "said only by the verb that started it")
+        missing = self.cli("inspect", unknown)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("no cadgen server", missing.stderr)
+        self.assertEqual(list(self.state.iterdir()), [], "ordinary commands started nothing")
+        engine_daemon.bootstrap(self.env)
         self.assertEqual(self.cli("stop").returncode, 0)
         done = self.cli("status")
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "no engine server is running\n", ""))
 
-    def test_a_server_of_an_older_protocol_is_still_stopped(self) -> None:
-        from unittest import mock
-
+    def test_an_incompatible_server_is_refused_and_is_never_stopped_implicitly(self) -> None:
         from cadgen.engine import client, daemon
 
-        older = daemon.PROTOCOL - 1 or 1
-        # The server a cadgen of an older protocol started: the same installation, its own door.
+        older = daemon.PROTOCOL - 1
+        self.env.update(CADGEN_STATE_DIR=str(self.state / "state"), CADGEN_CACHE_DIR=str(self.state / "cache"))
         server = subprocess.Popen([sys.executable, "-c", "import sys; from cadgen.engine import daemon; "
                                    f"daemon.PROTOCOL = {older}; sys.exit(daemon.main())"], env=self.env,
                                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.addCleanup(lambda: server.poll() is None and server.kill())
-        with mock.patch.dict(os.environ, {"CADGEN_ENGINE_DIR": str(self.state)}), \
-                mock.patch.object(daemon, "PROTOCOL", older + 1):
-            address = daemon.address(older)
+        self.addCleanup(engine_daemon.reap, server)
+        with mock.patch.dict(os.environ, self.env, clear=True):
             deadline = time.monotonic() + 60
-            while (found := client._connect(address)) is None:
-                self.assertIsNone(server.poll(), "the older server exited before it listened")
-                self.assertLess(time.monotonic(), deadline, "the older server listened")
+            while (found := client._connect()) is None:
+                self.assertIsNone(server.poll(), "the server exited before it listened")
+                self.assertLess(time.monotonic(), deadline, "the server listened")
                 time.sleep(0.05)
             found.close()
-            self.assertIsNone(client.request({"op": "status"}, start=False), "this protocol's server is another")
-        # ``cadgen stop`` of this protocol reaches it, and says so in one line, no JSON.
+            with self.assertRaisesRegex(ConnectionError, "mismatch"):
+                client.request({"op": "status"}, start=False)
         done = self.cli("stop")
-        self.assertEqual((done.returncode, done.stdout, done.stderr),
-                         (0, f"stopped the engine server at {address}\n", ""))
-        self.assertEqual(server.wait(timeout=60), 0)
-        self.assertFalse(address.exists())
-        done = self.cli("stop")
-        self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "no engine server is running\n", ""))
-        done = self.cli("stop", "--json")
-        self.assertEqual((done.returncode, json.loads(done.stdout)), (0, {"ok": True, "stopped": []}))
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("mismatch", done.stderr)
+        self.assertIsNone(server.poll(), "an incompatible server remains running")
 
 
 class OwnFilesTest(unittest.TestCase):
@@ -897,9 +903,10 @@ class OwnFilesTest(unittest.TestCase):
         own = Path(tempfile.mkdtemp(prefix="own-"))
         self.addCleanup(shutil.rmtree, own, True)
         self.env = engine_daemon.watched({**os.environ, "PYTHONPATH": str(SRC), "CADGEN_ENGINE_DIR": str(self.state),
+                                          "CADGEN_PORT": str(engine_daemon.free_port()),
                                           "CADGEN_STATE_DIR": str(own / "state"), "CADGEN_CACHE_DIR": str(own / "cache"),
                                           "CADGEN_ENGINE_STANDBY": "0"}, self.addCleanup)
-        patch = mock.patch.dict(os.environ, {"CADGEN_ENGINE_DIR": str(self.state)})
+        patch = mock.patch.dict(os.environ, self.env, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -1037,7 +1044,7 @@ class StateDirSpellingTest(unittest.TestCase):
         dotted_env = engine_daemon.watched({**env, "CADGEN_ENGINE_DIR": dotted}, self.addCleanup)
         plain_env = engine_daemon.watched({**env, "CADGEN_ENGINE_DIR": plain}, self.addCleanup)
         self.addCleanup(engine_daemon.run, [sys.executable, "-m", "cadgen.engine", "stop"], env=plain_env)
-        probe = "from cadgen.engine.client import request; print(request({'op': 'status'})['pid'])"
+        probe = "from cadgen.engine.client import request; print(request({'op': 'status'}, start=True)['pid'])"
         started = engine_daemon.run([sys.executable, "-c", probe], env=dotted_env)
         self.assertEqual(started.returncode, 0, started.stderr)
         with mock.patch.dict(os.environ, {"CADGEN_ENGINE_DIR": plain}):
@@ -1108,19 +1115,13 @@ class ListenTest(unittest.TestCase):
         taken.bind(("127.0.0.1", 0))
         taken.listen()
         port = taken.getsockname()[1]
-        for engine, request in ((daemon.Daemon(), {"port": port}), (daemon.Daemon(port=port), {})):
-            with mock.patch("cadgen.engine.serve.Mesher") as mesher, mock.patch.object(daemon, "HTTP_FACTORY", None), \
-                    mock.patch.object(daemon, "_answers", return_value=False), mock.patch.object(daemon, "_note"):
-                # The listen tried (no probe answered first): the server it made fails its bind.
-                with self.assertRaisesRegex(daemon.PortHeld,
-                                            f"^port {port} is held by .+: stop it, or pass another --port$"):
-                    engine.serve(request)
-            mesher.return_value.stop.assert_called_once_with()
-            self.assertIsNone(engine.server)
-            if request:  # a request's own port: that request refused, the engine running on for the others
-                self.assertIsNone(engine.refusal)
-            else:
-                self.assertIsNotNone(engine.refusal, "an engine whose own port is held can never serve: it stops")
+        engine = daemon.Daemon(port=port)
+        with mock.patch("cadgen.engine.serve.Mesher") as mesher, mock.patch.object(daemon, "HTTP_FACTORY", None), \
+                mock.patch.object(daemon, "_answers", return_value=False):
+            with self.assertRaisesRegex(daemon.PortHeld, f"^port {port} is held by"):
+                engine.serve({})
+        mesher.return_value.stop.assert_called_once_with()
+        self.assertIsNone(engine.server)
         with mock.patch("cadgen.viewer.engine_app.EngineApp") as app, self.assertRaises(OSError):
             engine_host.http_factory(mock.Mock(), "127.0.0.1", port)
         app.return_value.close.assert_called_once_with()
@@ -1141,9 +1142,15 @@ class DaemonTest(unittest.TestCase):
         """An engine folder and its environment, the engine stopped and the folder removed at ``cleanup``."""
         state = Path(tempfile.mkdtemp(prefix="eng-", dir="/tmp" if os.name != "nt" else None)).resolve()
         cleanup(shutil.rmtree, state, True)
+        storage = Path(tempfile.mkdtemp(prefix="engine-storage-")).resolve()
+        cleanup(shutil.rmtree, storage, True)
         env = engine_daemon.watched({**os.environ, "PYTHONPATH": str(SRC), "CADGEN_ENGINE_DIR": str(state),
+                                     "CADGEN_PORT": str(engine_daemon.free_port()),
+                                     "CADGEN_STATE_DIR": str(storage / "state"),
+                                     "CADGEN_CACHE_DIR": str(storage / "cache"),
                                      "CADGEN_ENGINE_MESH": "inline", **extra}, cleanup)
         cleanup(cls.stopped, state, env)
+        engine_daemon.bootstrap(env)
         return state, env
 
     def setUp(self) -> None:
@@ -1169,8 +1176,9 @@ class DaemonTest(unittest.TestCase):
         while any(state.glob("*.door")) and time.monotonic() < deadline:
             time.sleep(0.05)
 
-    def _stop_daemon(self) -> None:
+    def _restart_daemon(self) -> None:
         self.stopped(self.state, self.env)
+        engine_daemon.bootstrap(self.env)
 
     def cli(self, *args: str, env: dict | None = None) -> subprocess.CompletedProcess:
         return engine_daemon.run([sys.executable, "-m", "cadgen.engine", *args], cwd=self.folder, env=env or self.env)
@@ -1222,12 +1230,12 @@ class DaemonTest(unittest.TestCase):
             self.assertEqual(inspected.returncode, 0, inspected.stderr)
         self.assertEqual((self.folder / "XBF/block.xbf").read_bytes(), saved)
         self.assertFalse(marker.exists())
-        self._stop_daemon()
+        self._restart_daemon()
         # After a restart the registry knows it: refused with the command that builds it again, run by no one.
         missing = self.cli("inspect", ident, "face 1")
         self.assertEqual(missing.returncode, 2)
         self.assertIn(f"block ({ident}) is not saved: the engine's cache holds no file of its last build; run "
-                      "`cadgen run ", missing.stderr)
+                      "`python ", missing.stderr)
         self.assertFalse(marker.exists())
         inspected = self.cli("inspect", str(self.folder / "XBF/block.xbf"), "--query", "build")
         self.assertEqual(inspected.returncode, 0, inspected.stderr)
@@ -1274,11 +1282,11 @@ class DaemonTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in models], [address])
         self.assertEqual([path.name for path in self.folder.iterdir()], ["bracket.py"],
                          "no cache, document, or thumbnail on disk")
-        self._stop_daemon()
+        self._restart_daemon()
         missing = self.cli("inspect", f"{address}#face 1")
         self.assertEqual(missing.returncode, 2)
         self.assertIn(f"bracket ({address}) is not saved: the engine's cache holds no file of its last build; "
-                      "run `cadgen run ", missing.stderr)
+                      "run `python ", missing.stderr)
         self.assertEqual(json.loads(self.cli("status", "--json").stdout)["models"], [],
                          "a restart holds nothing: status lists what this server built")
 
@@ -1453,10 +1461,10 @@ if __name__ == '__main__':
         build(12)
         self.assertTrue(build(10)["files"][str(xbf)]["written"], "the edit's file is replaced")
         self.assertEqual(xbf.read_bytes(), cold, "the warm worker wrote the cold one's bytes")
-        self._stop_daemon()
+        self._restart_daemon()
         self.assertTrue(build(10)["cache"]["used"], "a fresh worker takes the file its key is in")
         xbf.unlink()
-        self._stop_daemon()
+        self._restart_daemon()
         self.assertTrue(build(10)["files"][str(xbf)]["written"])
         self.assertEqual(xbf.read_bytes(), cold, "a fresh worker writes the same bytes")
 
@@ -1518,7 +1526,7 @@ if __name__ == '__main__':
         # A daemon started again with no build serves the model from its cache cold: no worker
         # holds a trace of it, so ``made_by`` is null -- and every fact the kernel measures is
         # what it was. Nothing of the provenance was written anywhere.
-        self._stop_daemon()
+        self._restart_daemon()
         cold = self.where("block/face 1", ident)
         self.assertIsNone(cold.pop("made_by"))
         self.assertEqual({k: v for k, v in cold.items() if k not in drop}, {k: v for k, v in face.items() if k not in drop})
@@ -1569,7 +1577,7 @@ if __name__ == '__main__':
             """), encoding="utf-8")
 
         def status() -> dict:
-            with mock.patch.dict(os.environ, {"CADGEN_ENGINE_DIR": str(self.state)}):
+            with mock.patch.dict(os.environ, self.env, clear=True):
                 return client.request({"op": "status"}, start=False) or {}
 
         def until(condition) -> None:
@@ -1627,7 +1635,8 @@ if __name__ == '__main__':
                          ["XBF/block.xbf", "block.py", "peg.stl"])
 
     def test_decoration_only_declares_and_main_calls_only_its_selected_model(self) -> None:
-        self.own()  # no engine yet, so none an import started goes unseen
+        self.own()
+        self.stopped(self.state, self.env)  # declarations must work with no running server
         self.script.write_text(textwrap.dedent("""
             from cadgen import model, xbf
 
@@ -1650,7 +1659,8 @@ if __name__ == '__main__':
         declared = self.run_script("block.py")
         self.assertEqual((declared.returncode, declared.stdout.strip()), (0, "after definitions False"), declared.stderr)
         self.assertFalse((self.folder / "XBF").exists())
-        self.assertFalse(self.state.exists() and any(self.state.iterdir()), "importing starts no daemon")
+        self.assertFalse(any(self.state.glob("*.door")) or any(self.state.glob("*.port")), "importing starts no daemon")
+        engine_daemon.bootstrap(self.env)
         called = engine_daemon.run([sys.executable, "block.py", "call"], cwd=self.folder, env=self.env)
         self.assertEqual(called.returncode, 0, called.stderr)
         self.assertIn("after call", called.stdout)
@@ -1738,7 +1748,7 @@ if __name__ == '__main__':
         """``python model.py`` serves its document, so the daemon starts its server; the meshing
         pool waits for a page, a view or a mesh: the daemon's only child is the worker (with no
         standby, ``CADGEN_ENGINE_STANDBY=0``)."""
-        self.own()
+        self.own(CADGEN_ENGINE_STANDBY="0", CADGEN_ENGINE_MESH="processes")
         env = {name: value for name, value in self.env.items() if name != "CADGEN_ENGINE_MESH"}
         env["CADGEN_ENGINE_STANDBY"] = "0"
         self.script.write_text(textwrap.dedent(MODEL.format(size=3)), encoding="utf-8")

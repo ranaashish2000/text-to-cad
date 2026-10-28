@@ -1,5 +1,4 @@
-"""Reaching the daemon: connect through its door (on Windows, its loopback port), starting it first
-when none answers."""
+"""Attach to the explicitly selected server through its private, authenticated door."""
 
 from __future__ import annotations
 
@@ -8,6 +7,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +36,9 @@ def _connect(address: Path | None = None) -> Connection | None:
     """A connection to the daemon at ``address`` (its door, on Windows its port file; by default
     this protocol's), or None when none answers there. ``ConnectionError`` when the system refuses
     this process the engine's folder (a sandbox that forbids writing there)."""
+    folder = (address or _daemon.address()).parent
+    if folder.exists() and (refusal := _daemon.folder_refusal(folder)) is not None:
+        raise ConnectionError(refusal)
     try:
         if _daemon.WINDOWS:
             port, _token = _port_text(address or _daemon.port_path()).split()
@@ -44,7 +47,7 @@ def _connect(address: Path | None = None) -> Connection | None:
             stream = connection.makefile("rwb")
             return Connection(stream, stream, stream, connection)
         door = address or _daemon.door_path()
-        if _daemon.folder_refusal(door.parent) is not None or not door.exists():
+        if not door.exists():
             return None
         return dial(door)
     except PermissionError as error:
@@ -129,9 +132,9 @@ def environment() -> dict[str, str]:
     another folder, or none."""
     env = dict(os.environ)
     path = env.get("PYTHONPATH")
-    if path:
+    if path is not None:
         cwd = os.getcwd()
-        env["PYTHONPATH"] = os.pathsep.join(item if not item or os.path.isabs(item) else os.path.join(cwd, item)
+        env["PYTHONPATH"] = os.pathsep.join(item if os.path.isabs(item) else os.path.join(cwd, item)
                                             for item in path.split(os.pathsep))
     return env
 
@@ -145,9 +148,14 @@ def _start() -> subprocess.Popen:
     if root not in path.split(os.pathsep):
         env["PYTHONPATH"] = os.pathsep.join(item for item in (root, path) if item)
     _daemon.bytecode(env)
-    return subprocess.Popen([sys.executable, "-P", "-m", DAEMON_MODULE], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd=_working_folder(),
-                            **_daemon.detached())
+    process = subprocess.Popen([sys.executable, "-P", "-m", DAEMON_MODULE], stdin=subprocess.DEVNULL,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env, cwd=_working_folder(),
+                               **_daemon.detached())
+    # Bootstrap may live as long as the server (MCP, an embedded client or a test). Reap our
+    # child when it exits instead of leaving a zombie until another subprocess is started.
+    if hasattr(process, "wait"):
+        threading.Thread(target=process.wait, name="cadgen-server-exit", daemon=True).start()
+    return process
 
 
 def _working_folder() -> str | None:
@@ -161,13 +169,15 @@ def _working_folder() -> str | None:
     return str(folder.parent) if folder.parent.exists() else None
 
 
-def connect(*, start: bool = True, timeout: float = 60.0) -> Connection | None:
+def connect(*, start: bool = False, timeout: float = 60.0) -> Connection | None:
     """A connection to the daemon, started when ``start`` and none answers. In a shell whose
     sandbox refuses the loopback port the engine's HTTP server needs, none is started: that is
     said at once, as is a daemon that exits failing (its note, ``daemon.failure_path``)."""
     found = _connect()
-    if found is not None or not start:
-        return found
+    if found is not None:
+        return _greet(found)
+    if not start:
+        return None
     if _sandboxed():
         raise ConnectionError(SANDBOXED)
     try:
@@ -188,6 +198,7 @@ def connect(*, start: bool = True, timeout: float = 60.0) -> Connection | None:
     while time.monotonic() < deadline:
         found = _connect()
         if found is not None:
+            found = _greet(found)
             _told_started(mine)
             return found
         time.sleep(0.02)
@@ -216,6 +227,40 @@ def _told_started(mine: list[subprocess.Popen]) -> None:
         on_started()
 
 
+def missing() -> ConnectionError:
+    port = _daemon.selected_port()
+    return ConnectionError(f"no cadgen server is running on port {port}; start `cadgen server --port {port}` "
+                           "outside the sandbox, or start the CAD plugin. Set CADGEN_PORT to select another server; "
+                           "run `cadgen doctor --json --python /path/to/project/python` for diagnostics")
+
+
+def _greet(connection: Connection, address: Path | None = None) -> Connection:
+    """Validate the server before sending client environment, paths or work."""
+    from cadgen.engine.previous import version
+
+    message = {"op": "hello", "protocol": _daemon.PROTOCOL, "release": version(),
+               "port": _daemon.selected_port()}
+    try:
+        if _daemon.WINDOWS:
+            message = {"token": _port_text(address or _daemon.port_path()).split()[1], **message}
+        connection.writer.write((json.dumps(message) + "\n").encode())
+        connection.writer.flush()
+        answer = json.loads(connection.reader.readline() or b"{}")
+        if answer.get("failed"):
+            raise ConnectionError(str(answer["failed"]) + "; run `cadgen doctor --json --python /path/to/project/python` "
+                                  "for diagnostics")
+        if (answer.get("protocol") != _daemon.PROTOCOL or answer.get("release") != version()
+                or answer.get("port") != _daemon.selected_port() or not isinstance(answer.get("instance"), str)
+                or not answer["instance"]):
+            raise ConnectionError("the selected cadgen server has an incompatible protocol, release or port; "
+                                  "client and server must use exactly the same cadgen release")
+        connection.engine_identity = {key: answer[key] for key in ("protocol", "release", "port", "instance")}
+        return connection
+    except BaseException:
+        connection.close()
+        raise
+
+
 def wait_gone(timeout: float = 60.0, endpoint: _daemon.Endpoint | None = None) -> bool:
     """Wait until the daemon (by default this protocol's) is gone: its door no longer answers
     and its lock, held until its workers have stopped, is free."""
@@ -233,10 +278,10 @@ def wait_gone(timeout: float = 60.0, endpoint: _daemon.Endpoint | None = None) -
     return False
 
 
-def hold(*, start: bool = True, host: Callable[[], str | None] | None = None,
+def hold(*, start: bool = False, host: Callable[[], str | None] | None = None,
          holder: str | None = None) -> Connection | None:
-    """A hold on the engine (``Daemon.hold``), started when ``start`` and none runs: while the
-    connection returned stays open, the engine does not stop for idleness. Reading it waits until
+    """A hold on the engine (``Daemon.hold``), explicitly bootstrapped only when ``start``. The
+    connection owns its MCP sessions. Reading it waits until
     the engine goes (its end of file). None when none runs and ``start`` is false. ``host()``, asked
     once the engine answers, names the agent host the holder serves (its ``status`` counts it);
     ``holder``, the name its MCP sessions are opened under, which end when the hold does."""
@@ -244,7 +289,7 @@ def hold(*, start: bool = True, host: Callable[[], str | None] | None = None,
     if connection is None:
         return None
     try:
-        message: dict[str, Any] = {"op": "hold"}
+        message: dict[str, Any] = {"op": "hold", "engineIdentity": connection.engine_identity}
         named = host() if host is not None else None
         if named:
             message["host"] = named
@@ -263,22 +308,27 @@ def hold(*, start: bool = True, host: Callable[[], str | None] | None = None,
 
 
 def request(message: dict[str, Any], on_log: Callable[[dict[str, Any]], None] = lambda _m: None, *,
-            start: bool = True, on_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any] | None:
+            start: bool | None = None, on_progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any] | None:
     """Send one request; every log line to ``on_log`` and every progress frame of its build to
     ``on_progress`` (``progress.py``); the final answer returned (None when no daemon is up and
     ``start`` is false)."""
-    connection = connect(start=start)
+    connection = connect(start=start is True)
     if connection is None:
+        if start is None:
+            raise missing()
         return None
     return _exchange(connection, message, on_log, on_progress)
 
 
 def _exchange(connection: Connection, message: dict[str, Any], on_log: Callable[[dict[str, Any]], None] = lambda _m: None,
               on_progress: Callable[[dict[str, Any]], None] | None = None, address: Path | None = None) -> dict[str, Any]:
-    if _daemon.WINDOWS:
-        # The token first, so the daemon checks it in the line's first bytes, before it reads the rest.
-        message = {"token": (address or _daemon.port_path()).read_text(encoding="utf-8").split()[1], **message}
+    if not hasattr(connection, "engine_identity"):
+        _greet(connection, address)
+    message = {**message, "engineIdentity": connection.engine_identity}
     with connection:
+        if _daemon.WINDOWS:
+            # The token first, so the daemon checks it before reading the request body.
+            message = {"token": _port_text(address or _daemon.port_path()).split()[1], **message}
         connection.writer.write((json.dumps(message) + "\n").encode())
         connection.writer.flush()
         for line in connection.reader:
@@ -291,8 +341,7 @@ def _exchange(connection: Connection, message: dict[str, Any], on_log: Callable[
                     on_progress(answer["progress"])
                 continue
             notice = answer.pop("notice", None)
-            # The request that bound the engine's port, when that start retired an older engine or
-            # moved the port (``daemon.bind``): a line each.
+            # Diagnostic notices, when the server has any.
             for said in (notice or "").splitlines():
                 print(f"cadgen: {said}", file=sys.stderr)
             return answer
@@ -300,8 +349,7 @@ def _exchange(connection: Connection, message: dict[str, Any], on_log: Callable[
 
 
 def sweep(*, stop: bool) -> dict[str, list[str]]:
-    """Every daemon of this installation, whatever protocol it speaks (``daemon.endpoints``): with
-    ``stop``, each live one stopped and waited for until gone (``stopped``, its door or port file);
+    """The selected port's daemon: with ``stop``, stopped and waited for until gone;
     a live one left running listed in ``running``. The door and lock files of a dead one -- nothing
     answers there and nobody holds its lock -- are removed (``removed``). A daemon starting or
     stopping holds its lock before it listens and until it has left, so its files are never taken."""

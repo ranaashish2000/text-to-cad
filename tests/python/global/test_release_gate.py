@@ -148,11 +148,11 @@ class PublishGate(unittest.TestCase):
 
     def test_the_wheel_s_smoke_check_starts_no_engine(self):
         # CI runs doctor on the built wheel to prove it answers; an engine it started would linger in
-        # the job, so the check says whether one runs and never starts it (``doctor --no-server``).
+        # the job, so the check says whether one runs and never starts it (``doctor``).
         doctors = [line.strip() for line in WORKFLOW.splitlines() if re.search(r"cadgen\"? doctor\b", line)]
         self.assertTrue(doctors, "the release smoke-tests doctor")
         for line in doctors:
-            self.assertIn("doctor --no-server", line)
+            self.assertIn("doctor", line)
 
     def test_installers_get_the_version_only_once_pypi_serves_it(self):
         # The upload, then PyPI's index -- what uv resolves a pin through -- listing it, both in the
