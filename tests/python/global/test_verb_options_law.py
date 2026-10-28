@@ -60,8 +60,10 @@ class ExportTakesADocumentAndDestinations(unittest.TestCase):
 
 
 class SnapshotTakesThePictureAlone(unittest.TestCase):
+    # ``view``: a part's named view (``cadgen.ap242``'s ``view``) the picture is drawn as -- its camera, its section
+    # and the PMI it shows -- about the picture, as ``camera`` is, never the model.
     PICTURE = ("display", "camera", "grid", "preview", "pose", "width", "height", "size_profile", "daemon",
-               "annotation", "measurements")
+               "annotation", "measurements", "view")
 
     def test_a_handle_s_snapshot_takes_the_verb_s_picture_options_by_name(self) -> None:
         verb = inspect.signature(cadgen.snapshot).parameters
