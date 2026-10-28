@@ -79,6 +79,11 @@ dependencies"](CONTRIBUTING.md#development-dependencies)). In a checkout, instal
   hosts `cadgen.viewer`'s HTTP app).
 - `apps/mcp/` ([README](apps/mcp/README.md)): the CAD app agent hosts render: tabs in
   Codex, cards in Claude Desktop (its server is `cadgen mcp`).
+- `apps/t3code/`: a git submodule pinning [T3 Code](https://github.com/pingdotgg/t3code) with
+  this plugin built in ([amywork777/t3code](https://github.com/amywork777/t3code/tree/amy/text-to-cad),
+  branch `amy/text-to-cad`): a coding agent that designs with the skills, the CAD app beside the
+  thread. App changes go to that branch (its `TEXT-TO-CAD.md`); CAD stays here as the plugin.
+  `git submodule update --init apps/t3code` fetches it; plain clones and plugin installs leave it empty.
 - `packages/` ([README](packages/README.md)): the three shared packages.
   `packages/cadgen` ([README](packages/cadgen/README.md)) is the published distribution,
   not just the Python: the engine (`cadgen/engine`: models built into documents it holds,
