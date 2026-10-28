@@ -34,8 +34,8 @@ cadgen inspect XBF/arm.xbf                    # what it holds, then its build cl
 makes an edit cost what it changed, documents and their exports, kinematics and configuration sequences,
 materials, references to geometry, snapshots drawn by OCCT; the CAD Viewer (`cadgen viewer [FILE]`: a
 launcher for the installation’s engine’s one page, every document at `/<id>`, every file read by its absolute path); CAD beside an agent's chat (`cadgen mcp`: a stateless stdio peer of the engine’s
-HTTP MCP endpoint, with tools and the app page owned by the engine); the URDF, SDF and SRDF validators; and
-engineering drawings (`@eng_drawing`).
+HTTP MCP endpoint, with tools and the app page owned by the engine); the URDF, SDF and SRDF validators;
+engineering drawings (`@eng_drawing`); and work instructions (`@work_instruction`).
 
 **MAY DEPEND ON** — the Python ecosystem it declares (OCP/build123d lazily, never at
 `import cadgen`) and the bundled runtime. Never app code, never JavaScript source at runtime.
@@ -376,6 +376,8 @@ src/cadgen/
                          #   reads off it; held in memory
   drawing_payload.py     # a DXF flattened by ezdxf for the viewer's pane
   eng_drawing.py         # @eng_drawing: Sheets and Views over a part, one PDF
+  work_instruction.py    # @work_instruction: the steps that build one assembly, one PDF;
+                         #   its pages and figures in _internal/work_instruction_pages.py
   flatten.py             # flat patterns: exact 2D geometry from a solid's planar faces
   geometry.py            # measurements of native geometry: closest points, overlap,
                          #   soundness, mass properties
