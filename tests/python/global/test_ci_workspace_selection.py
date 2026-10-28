@@ -237,12 +237,26 @@ class ChangesRunWhatCanBreak(unittest.TestCase):
         for path in ("packages/cadgen/src/cadgen/geometry.py", "packages/cadgen/src/cadgen/engine/api.py",
                      "packages/cadgen/src/cadgen/engine/page/viewer.js"):
             with self.subTest(path=path):
-                self.assertEqual(jobs_for(path), GATED - {"core-js", "web", "mcp", "api", "docs"})
+                self.assertEqual(jobs_for(path), GATED - {"core-js", "web", "mcp", "api", "docs", "cam"})
                 chosen = tests_for(path)
                 self.assertEqual(chosen["cadgen_tests"], [CADGEN])
                 self.assertEqual(chosen["skills_tests"], [])
                 self.assertEqual(set(chosen["skills_policy"]), {f"{POLICY}/{name}" for name in selector.HEAVY_POLICY})
                 self.assertEqual((route(path)["web_ui"], route(path)["web_viewer"]), ("false", "true"))
+
+    def test_cam_runs_its_own_job_with_freecad_installed(self):
+        job = JOBS["cam"]
+        self.assertIn("FreeCAD.AppImage --appimage-extract", job)
+        self.assertIn("sha256sum -c", job)                  # the download is the release's, checked
+        self.assertIn("CADGEN_FREECAD=", job)
+        self.assertIn(f"{CADGEN}/cam", job)
+        self.assertIn("timeout-minutes: 15", job)
+        for path in ("packages/cadgen/src/cadgen/_internal/cam/run.py", "packages/cadgen/src/cadgen/cam.py",
+                     "packages/cadgen/src/cadgen/cli/cam_plan.py", "packages/cadgen/src/cadgen/results.py",
+                     f"{CADGEN}/cam/test_cam_plan.py", "tests/python/support/cam_fixtures.py", "skills/cam/SKILL.md"):
+            with self.subTest(path=path):
+                self.assertIn("cam", jobs_for(path))
+        self.assertNotIn("cam", jobs_for("packages/cadgen/src/cadgen/geometry.py"))
 
     def test_the_viewer_and_the_mcp_server_reach_only_what_reaches_them(self):
         viewer = tests_for("packages/cadgen/src/cadgen/viewer/scanner.py")
@@ -311,10 +325,10 @@ class ChangesRunWhatCanBreak(unittest.TestCase):
             "scripts/test/test-js.sh": {"core-js", "web", "mcp", "skills"},
             "scripts/test/check-dependencies.mjs": {"core-js", "web", "mcp", "skills"},
             "scripts/test/test-global.sh": {"skills"},
-            "scripts/test/test-python.sh": {"cadgen-linux", "cadgen-windows", "skills"},
+            "scripts/test/test-python.sh": {"cadgen-linux", "cadgen-windows", "cam", "skills"},
             "scripts/release/sync-version.mjs": {"packaging", "skills"},
             "scripts/github-workflows/check-builds.sh": {"packaging", "skills"},
-            "scripts/bundle/bundle.sh": GATED - {"core-js", "web", "mcp", "api", "docs"},
+            "scripts/bundle/bundle.sh": GATED - {"core-js", "web", "mcp", "api", "docs", "cam"},
             "scripts/brand/export-logos.mjs": {"docs", "skills"},
             "scripts/bench/occt_parity.py": {"skills"},
             "scripts/bench/corpus.json": {"skills"},
