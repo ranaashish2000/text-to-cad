@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MousePointer2 } from "lucide-react";
 import { scenePartCount, viewFeaturesForKind } from "@text-to-cad/core/common/viewSettings.js";
 import { useExportView } from "../../export/context.js";
@@ -23,11 +23,52 @@ const NO_REFERENCES = Object.freeze([]);
 const EXPLODE_OFF = Object.freeze({ exploded: { enabled: false, amount: 0 } });
 const CLIP_OFF = Object.freeze({ clip: { enabled: false, axis: "x", invert: false } });
 
-function GlbSurface({ view, data }) {
-  const { t } = useI18n();
+/** Whether a loaded scene carries an FEA result: a mesh `cadgen fea solve` wrote, with its fields (`feaResult.js` reads it). */
+function carriesFeaResult(root) {
+  let found = false;
+  root?.traverse?.((object) => {
+    if (!found && object?.isMesh && object.geometry && object.userData?.generator === "cadgen fea" && Array.isArray(object.userData.fields)) found = true;
+  });
+  return found;
+}
+
+// The FEA result viewer (`feaView.jsx`), once a result has loaded it, for every result after it.
+let feaView = null;
+/** Loads the FEA result viewer: its own chunk, which a plain GLB never fetches. */
+export const loadFeaView = () => import("./feaView.jsx").then((module) => { feaView = module; return module; });
+
+/**
+ * The FEA result viewer for a scene that carries a result, loaded the first time one does; `pending` while it
+ * loads. A plain GLB's is null, and so is a result's should the chunk fail to load: it is then drawn as a plain GLB.
+ */
+function useFeaView(root) {
+  const wanted = useMemo(() => carriesFeaResult(root), [root]);
+  const [kit, setKit] = useState(feaView);
+  useEffect(() => {
+    if (!wanted || kit) return undefined;
+    let live = true;
+    loadFeaView().then((module) => { if (live) setKit(module); }, () => { if (live) setKit(false); });
+    return () => { live = false; };
+  }, [wanted, kit]);
+  return { kit: wanted && kit ? kit : null, pending: wanted && kit === null };
+}
+
+/**
+ * A GLB file: its scene, loaded once, drawn by the FEA result viewer when it carries a result (`FeaSurface.jsx`,
+ * its own surface over the same shell) and by the GLB surface below otherwise. A result waits for its viewer as
+ * the file loading, so it is framed once, as that viewer draws it.
+ */
+function GlbFile({ view, data }) {
   const document = useWorkspaceDocument({ view, data });
   const loaded = useGlbScene({ entry: document.entry, resources: document.client.resources });
-  const scene = loaded.scene;
+  const { kit: fv, pending } = useFeaView(loaded.scene?.document?.scene);
+  if (fv) return <fv.FeaSurface view={view} document={document} loaded={loaded} fv={fv} />;
+  return <GlbSurface view={view} document={document} loaded={loaded} pending={pending} />;
+}
+
+function GlbSurface({ view, document, loaded, pending }) {
+  const { t } = useI18n();
+  const scene = pending ? null : loaded.scene;
   const loadAlert = useMemo(() => workspaceLoadAlert({
     catalogError: document.catalogError, error: loaded.error, modelKey: document.modelKey, hasScene: Boolean(scene), t
   }), [document.catalogError, loaded.error, document.modelKey, scene, t]);
@@ -87,7 +128,7 @@ function GlbSurface({ view, data }) {
   const shell = useRendererShell({
     view, services: document.services, resource: document.resource, modelKey: document.modelKey, revisionKey: loaded.revision,
     features, toolModes: GLB_TOOL_MODES, tool: tools.tool, previewable: true, preview, scene, sceneEffects: true,
-    load: { busy: loaded.busy && !scene, updating: loaded.busy && Boolean(scene), progress: loaded.progress, alert: loadAlert },
+    load: { busy: (loaded.busy || pending) && !scene, updating: loaded.busy && Boolean(scene), progress: loaded.progress, alert: loadAlert },
     animation: routine, live, escape, deleteSelection: measure.removeSelected
   });
   shellRef.current = shell;
@@ -143,5 +184,5 @@ function GlbSurface({ view, data }) {
 
 export default function GlbRenderer(props) {
   const { data, ...view } = props;
-  return <GlbSurface key={JSON.stringify([view.source.id, view.file.path])} view={view} data={data} />;
+  return <GlbFile key={JSON.stringify([view.source.id, view.file.path])} view={view} data={data} />;
 }

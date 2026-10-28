@@ -69,6 +69,20 @@ dependencies = [
   # measurements) with Pillow.
   "pillow",
   "shapely",
+  # `cadgen fea parts` finds the parts that touch with scipy (a KD-tree of sampled
+  # faces) and no solver, so it runs without the fea extra. build123d brings it
+  # already; it is named here because cadgen imports it itself.
+  "scipy",
+]
+
+# An exception to the "a dependency of every install, not an extra" principle above:
+# the mesher is heavy and most installs never run a stress study. Opt-in: `cadgen fea solve`
+# only, and no other command needs it. netgen meshes the B-rep (LGPL-2.1, brings its own
+# OpenCascade, so it runs in a process of its own); wheels exist on every packaged target.
+# CalculiX, which solves, is a program the person installs (or the one their FreeCAD carries).
+[project.optional-dependencies]
+fea = [
+  "netgen-mesher>=6.2.2608",
 ]
 
 [project.urls]
@@ -86,6 +100,9 @@ search-path = ["src"]
 # A checkout under an ignored folder (a `.claude/worktrees/...` worktree) would
 # otherwise have src excluded by the ignore files above it and check nothing.
 use-ignore-files = false
+# The fea extra's netgen (`pip install 'cadgen[fea]'`): imported only by the mesher's own process, and absent
+# from a checkout installed without the extra, so its imports are not checked against stubs.
+ignore-missing-imports = ["netgen", "netgen.*"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

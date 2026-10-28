@@ -379,6 +379,9 @@ src/cadgen/
   flatten.py             # flat patterns: exact 2D geometry from a solid's planar faces
   geometry.py            # measurements of native geometry: closest points, overlap,
                          #   soundness, mass properties
+  fea.py                 # finite element analysis: `faces`, `parts` and `solve` over a
+                         #   STEP or .xbf part or assembly (the `fea` extra: netgen;
+                         #   the person's CalculiX solves); the rest in _internal/fea/
   analytics.py           # telemetry: usage counts and crash reports, on by default once
                          #   a command has said so, never after a no
   settings.py            # the person's settings: settings.json in the state directory
@@ -404,8 +407,8 @@ src/cadgen/
 
 Commands: `cadgen export`, `snapshot`, `serve`, `inspect`, `status`, `stop`, `delete` and
 `server` are the engine's verbs; `cadgen dxf snapshot`, `urdf snapshot` and `sdf snapshot` its
-snapshot for those files alone; `cadgen urdf|sdf|srdf validate` the validators; `cadgen
-doctor` the setup (the installation registered, the `cadgen` command written, the engine started),
+snapshot for those files alone; `cadgen urdf|sdf|srdf validate` the validators; `cadgen fea
+faces|parts|solve` finite element analysis (`solve` needs the `fea` extra and CalculiX); `cadgen doctor` the setup (the installation registered, the `cadgen` command written, the engine started),
 a skill's pin and what cadgen left behind that nothing needs, which `cadgen doctor --prune` removes
 (`_internal/leftovers.py`: engine records of an older format, the bytecode of installations no longer
 registered, cache folders no record names; none written in the last seven days); `cadgen run` a model script by the installation's python; `cadgen viewer` the engine page launcher;
@@ -432,3 +435,20 @@ The viewer exposes `POST /__cad/clipboard` for explicit viewport PNG copies. It
 uses the same host and custom-header POST gates as other mutation routes, limits
 images to 20 MiB, and delegates native delivery to `viewer/clipboard.py`. It never
 reads the clipboard. Unsupported desktop clipboard environments return an error.
+
+## Finite element analysis
+
+`cadgen.fea` (`cadgen fea faces|parts|solve`) studies a part or an assembly of a STEP or an `.xbf`.
+It reads the document in its own process, as the engine reads a file (`engine.document.load`), with
+no worker and no build, and names faces by the engine's refs, resolved in the document's structure
+as `cadgen inspect` resolves them (`engine.refs`): a study's `bracket/face 17` is the face the CAD
+Viewer copies. A study is a JSON file; a solve writes only the result GLB its `out` names and its
+JSON sidecar (and a `.vtu` when asked), each replaced only once all are written, so a failed run
+leaves the previous result as it was. `_internal/fea/` solves one kind of study: linear elastic
+stress and displacement. The mesher is the opt-in
+`fea` extra (`pip install 'cadgen[fea]'`: netgen, run in a process of its own, since its
+OpenCascade and OCP's cannot share one). The solver is CalculiX (`ccx`, 2.20 or newer), which the
+person installs (`conda install -c conda-forge calculix`, `calculix-ccx` on Debian and Ubuntu, or
+FreeCAD on macOS and Windows, which carries one): `CADGEN_CCX` names it, else `ccx` on PATH, else
+FreeCAD's. A missing or older one is an error saying how to install
+it; cadgen downloads no solver and has no other. The result names the CalculiX version that ran.
